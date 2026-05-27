@@ -1,0 +1,263 @@
+import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import DropboxSyncPlugin from "./main";
+import { isTokenValid, loadToken } from "./dropbox-auth";
+
+// ─── Settings Interface ──────────────────────────────────────────────────────
+
+export interface DropboxSyncSettings {
+	/** Dropbox App client ID (from Dropbox Developer Console) */
+	clientId: string;
+	/** OAuth token data (stored here by main.ts) */
+	dropboxToken: Record<string, unknown> | null;
+	/** Sync direction */
+	syncDirection: string;
+	/** Remote path in Dropbox */
+	remotePath: string;
+	/** Local vault path prefix to sync */
+	localPrefix: string;
+	/** Max file size in bytes (0 = no limit) */
+	maxFileSize: number;
+	/** Auto-sync on file save */
+	syncOnSave: boolean;
+	/** Last successful sync timestamp (ms) — for incremental sync */
+	lastSyncAt: number;
+	/** Dropbox list_folder cursor for incremental remote scan */
+	remoteCursor: string | null;
+	/** 增量同步计数器，满 10 次触发全量兜底 */
+	incrementalCount: number;
+}
+
+export const DEFAULT_SETTINGS: DropboxSyncSettings = {
+	clientId: "",
+	dropboxToken: null,
+	syncDirection: "upload",
+	remotePath: "/Apps/ObsidianSync",
+	localPrefix: "",
+	maxFileSize: 50 * 1024 * 1024, // 50 MB
+	syncOnSave: true,
+	lastSyncAt: 0,
+	remoteCursor: null,
+	incrementalCount: 0,
+};
+
+// ─── Settings Tab ────────────────────────────────────────────────────────────
+
+export class SettingsTab extends PluginSettingTab {
+	private plugin: DropboxSyncPlugin;
+
+	constructor(app: App, plugin: DropboxSyncPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		try {
+			containerEl.createEl("h2", { text: "Dropbox 同步" });
+
+			// ── 授权 ──────────────────────────────────────────────────────────
+
+			containerEl.createEl("h3", { text: "授权" });
+
+			const token = loadToken(this.plugin.settings.dropboxToken);
+			const isAuthed = isTokenValid(token);
+
+			const statusEl = containerEl.createEl("div", {
+				cls: `dropbox-sync-auth-status ${isAuthed ? "authorized" : "unauthorized"}`,
+			});
+			statusEl.textContent = isAuthed
+				? "✅ 已授权 Dropbox"
+				: "❌ 未授权 — 请在下方填写 App Key 并授权";
+
+			new Setting(containerEl)
+				.setName("Dropbox App Key")
+				.setDesc(
+					"在 https://www.dropbox.com/developers/apps 创建应用，复制 App Key 粘贴至此",
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("你的 Dropbox App Key")
+						.setValue(this.plugin.settings.clientId)
+						.onChange(async (value) => {
+							this.plugin.settings.clientId = value;
+							await this.plugin.saveSettings();
+						}),
+				);
+
+			new Setting(containerEl).addButton((btn) => {
+				btn.setButtonText(isAuthed ? "重新授权" : "授权 Dropbox")
+					.setCta()
+					.onClick(async () => {
+						if (!this.plugin.settings.clientId) {
+							new Notice("请先填写 Dropbox App Key");
+							return;
+						}
+						try {
+							btn.setDisabled(true);
+							btn.setButtonText("授权中…");
+							await this.plugin.authorizeDropbox();
+							new Notice("Dropbox 授权成功！");
+							this.display();
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							new Notice(`授权失败：${msg}`, 8000);
+						} finally {
+							btn.setDisabled(false);
+							this.display();
+						}
+					});
+			});
+
+			if (isAuthed) {
+				new Setting(containerEl).addButton((btn) => {
+					btn.setButtonText("撤销授权")
+						.setWarning()
+						.onClick(async () => {
+							await this.plugin.revokeDropbox();
+							new Notice("已撤销 Dropbox 授权");
+							this.display();
+						});
+				});
+			}
+
+			// ── 同步设置 ──────────────────────────────────────────────────────
+
+			containerEl.createEl("h3", { text: "同步设置" });
+
+			new Setting(containerEl)
+				.setName("同步方向")
+				.setDesc("上传：库 → Dropbox（安全）。下载：Dropbox → 库。双向：两边合并。")
+				.addDropdown((dropdown) =>
+					dropdown
+						.addOption("upload", "上传（库 → Dropbox）")
+						.addOption("download", "下载（Dropbox → 库）")
+						.addOption("two-way", "双向同步")
+						.setValue(this.plugin.settings.syncDirection)
+						.onChange(async (value) => {
+							this.plugin.settings.syncDirection = value;
+							await this.plugin.saveSettings();
+							this.plugin.reloadSyncEngine();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("远程路径")
+				.setDesc("Dropbox 上的同步目录（例如 /Apps/ObsidianSync）")
+				.addText((text) =>
+					text
+						.setPlaceholder("/Apps/ObsidianSync")
+						.setValue(this.plugin.settings.remotePath)
+						.onChange(async (value) => {
+							const normalized = value.startsWith("/") ? value : "/" + value;
+							this.plugin.settings.remotePath = normalized || "/Apps/ObsidianSync";
+							await this.plugin.saveSettings();
+							this.plugin.reloadSyncEngine();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("本地路径前缀")
+				.setDesc("只同步库的某个子文件夹（留空 = 整个库），例如「笔记」")
+				.addText((text) =>
+					text
+						.setPlaceholder("留空则同步整个库")
+						.setValue(this.plugin.settings.localPrefix)
+						.onChange(async (value) => {
+							this.plugin.settings.localPrefix = value;
+							await this.plugin.saveSettings();
+							this.plugin.reloadSyncEngine();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("最大文件大小")
+				.setDesc("超过此大小的文件将被跳过（0 = 不限制，默认 50MB）")
+				.addText((text) =>
+					text
+						.setPlaceholder("52428800")
+						.setValue(String(this.plugin.settings.maxFileSize))
+						.onChange(async (value) => {
+							const num = parseInt(value, 10);
+							if (!isNaN(num) && num >= 0) {
+								this.plugin.settings.maxFileSize = num;
+								await this.plugin.saveSettings();
+							}
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("保存时自动同步")
+				.setDesc("文件在 Obsidian 中保存后自动上传到 Dropbox")
+				.addToggle((toggle) =>
+					toggle
+						.setValue(this.plugin.settings.syncOnSave)
+						.onChange(async (value) => {
+							this.plugin.settings.syncOnSave = value;
+							await this.plugin.saveSettings();
+						}),
+				);
+
+			// ── 手动同步 ──────────────────────────────────────────────────────
+
+			containerEl.createEl("h3", { text: "手动同步" });
+
+			new Setting(containerEl).addButton((btn) => {
+				btn.setButtonText("🔄 立即同步")
+					.setCta()
+					.onClick(async () => {
+						if (!this.plugin.syncEngine) {
+							new Notice("请先授权 Dropbox");
+							return;
+						}
+						try {
+							btn.setDisabled(true);
+							btn.setButtonText("同步中…");
+							const result = await this.plugin.syncEngine.syncNow();
+							this.plugin.settings.lastSyncAt = result.lastSyncAt;
+							this.plugin.settings.remoteCursor = result.remoteCursor;
+							this.plugin.settings.incrementalCount = result.incrementalCount;
+							await this.plugin.saveSettings();
+							new Notice("同步完成！");
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							new Notice(`同步失败：${msg}`, 8000);
+						} finally {
+							btn.setDisabled(false);
+							btn.setButtonText("🔄 立即同步");
+						}
+					});
+			});
+
+			new Setting(containerEl).addButton((btn) => {
+				btn.setButtonText("取消同步")
+					.setWarning()
+					.onClick(() => {
+						this.plugin.syncEngine?.cancel();
+						new Notice("同步已取消");
+					});
+			});
+
+			// ── 设置说明 ──────────────────────────────────────────────────────
+
+			containerEl.createEl("h3", { text: "设置步骤" });
+			const infoEl = containerEl.createEl("div", { cls: "setting-item-description" });
+			infoEl.innerHTML = `
+				<ol>
+					<li>前往 <a href="https://www.dropbox.com/developers/apps" target="_blank">Dropbox 开发者控制台</a></li>
+					<li>创建新应用 → "Scoped access" → "App folder" 或 "Full Dropbox"</li>
+					<li>在 <strong>Permissions</strong> 标签页勾选：<code>files.metadata.read</code>、<code>files.content.read</code>、<code>files.content.write</code></li>
+					<li>在 <strong>OAuth 2</strong> 中设置重定向 URI：<code>http://127.0.0.1:54219/</code></li>
+					<li>复制 <strong>App Key</strong> 粘贴到上方输入框</li>
+					<li>点击 "授权 Dropbox" → 在浏览器中完成授权</li>
+					<li>授权后浏览器跳转到 <code>http://127.0.0.1:54219/</code>（显示无法访问 — 正常）</li>
+					<li>复制浏览器地址栏的完整网址 → 回到 Obsidian → 粘贴到弹出的对话框</li>
+				</ol>
+				<p>授权后，你的库会自动同步到 Dropbox 的 <code>${this.plugin.settings.remotePath}/</code> 目录。</p>
+			`;
+		} catch (err) {
+			console.error("Dropbox Sync: display error", err);
+		}
+	}
+}

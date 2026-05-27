@@ -1,0 +1,36 @@
+.dropbox-sync-status-bar {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.dropbox-sync-status-bar.syncing {
+	color: var(--text-muted);
+}
+
+.dropbox-sync-status-bar.synced {
+	color: var(--color-green);
+}
+
+.dropbox-sync-status-bar.error {
+	color: var(--color-red);
+}
+
+.dropbox-sync-auth-status {
+	padding: 8px 12px;
+	border-radius: 6px;
+	margin-bottom: 12px;
+	font-weight: 500;
+}
+
+.dropbox-sync-auth-status.authorized {
+	background: var(--background-modifier-success);
+	color: var(--text-success);
+	border: 1px solid var(--color-green);
+}
+
+.dropbox-sync-auth-status.unauthorized {
+	background: var(--background-modifier-error);
+	color: var(--text-on-accent);
+	border: 1px solid var(--color-red);
+}

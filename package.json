@@ -1,0 +1,19 @@
+{
+	"name": "obsidian-dropbox-sync",
+	"version": "0.1.0",
+	"description": "Sync vault to Dropbox",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+	},
+	"devDependencies": {
+		"@types/node": "^18.0.0",
+		"@typescript-eslint/eslint-plugin": "^5.0.0",
+		"@typescript-eslint/parser": "^5.0.0",
+		"builtin-modules": "^3.3.0",
+		"esbuild": "^0.17.0",
+		"obsidian": "latest",
+		"typescript": "^5.0.0"
+	}
+}
