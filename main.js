@@ -700,6 +700,60 @@ var DEFAULT_SETTINGS = {
   remoteCursor: null,
   incrementalCount: 0
 };
+var ImportModal = class extends import_obsidian3.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "\u5BFC\u5165\u914D\u7F6E" });
+    contentEl.createEl("p", {
+      text: "\u8BF7\u7C98\u8D34\u4E4B\u524D\u5BFC\u51FA\u7684\u914D\u7F6E JSON\uFF08\u5305\u542B App Key\u3001Token \u7B49\u5168\u90E8\u8BBE\u7F6E\uFF09"
+    });
+    const textarea = contentEl.createEl("textarea", {
+      attr: {
+        rows: "12",
+        style: "width: 100%; font-family: monospace; font-size: 13px; box-sizing: border-box; resize: vertical;",
+        placeholder: "\u5728\u6B64\u7C98\u8D34\u914D\u7F6E JSON \u2026"
+      }
+    });
+    const btnContainer = contentEl.createDiv({
+      attr: { style: "display: flex; gap: 8px; margin-top: 12px;" }
+    });
+    const importBtn = btnContainer.createEl("button", {
+      text: "\u{1F4E5} \u5BFC\u5165",
+      attr: { style: "flex: 1; cursor: pointer;" }
+    });
+    importBtn.addEventListener("click", async () => {
+      var _a;
+      const jsonStr = textarea.value.trim();
+      if (!jsonStr) {
+        new import_obsidian3.Notice("\u8BF7\u5148\u7C98\u8D34\u914D\u7F6E JSON");
+        return;
+      }
+      importBtn.disabled = true;
+      importBtn.textContent = "\u5BFC\u5165\u4E2D\u2026";
+      const ok = await this.plugin.importConfig(jsonStr);
+      if (ok) {
+        this.close();
+        (_a = this.plugin.settingTab) == null ? void 0 : _a.display();
+      } else {
+        importBtn.disabled = false;
+        importBtn.textContent = "\u{1F4E5} \u5BFC\u5165";
+      }
+    });
+    const cancelBtn = btnContainer.createEl("button", {
+      text: "\u53D6\u6D88",
+      attr: { style: "flex: 1; cursor: pointer;" }
+    });
+    cancelBtn.addEventListener("click", () => this.close());
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var SettingsTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -825,6 +879,18 @@ var SettingsTab = class extends import_obsidian3.PluginSettingTab {
           new import_obsidian3.Notice("\u540C\u6B65\u5DF2\u53D6\u6D88");
         });
       });
+      containerEl.createEl("h3", { text: "\u914D\u7F6E\u5BFC\u5165\u5BFC\u51FA" });
+      new import_obsidian3.Setting(containerEl).setName("\u5BFC\u51FA\u914D\u7F6E\u5230\u526A\u8D34\u677F").setDesc("\u5C06\u5F53\u524D\u6240\u6709\u8BBE\u7F6E\uFF08\u5305\u62EC Token\uFF09\u590D\u5236\u5230\u526A\u8D34\u677F\uFF0C\u53EF\u5728\u53E6\u4E00\u53F0\u8BBE\u5907\u4E0A\u5BFC\u5165").addButton(
+        (btn) => btn.setButtonText("\u{1F4CB} \u5BFC\u51FA\u914D\u7F6E").setCta().onClick(async () => {
+          await this.plugin.exportConfigToClipboard();
+        })
+      );
+      new import_obsidian3.Setting(containerEl).setName("\u4ECE\u526A\u8D34\u677F\u5BFC\u5165\u914D\u7F6E").setDesc("\u7C98\u8D34\u4E4B\u524D\u5BFC\u51FA\u7684 JSON \u914D\u7F6E\uFF0C\u8986\u76D6\u5F53\u524D\u6240\u6709\u8BBE\u7F6E").addButton(
+        (btn) => btn.setButtonText("\u{1F4E5} \u5BFC\u5165\u914D\u7F6E").onClick(() => {
+          const modal = new ImportModal(this.app, this.plugin);
+          modal.open();
+        })
+      );
       containerEl.createEl("h3", { text: "\u8BBE\u7F6E\u6B65\u9AA4" });
       const infoEl = containerEl.createEl("div", { cls: "setting-item-description" });
       infoEl.innerHTML = `
@@ -852,6 +918,7 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
     this.syncEngine = null;
+    this.settingTab = null;
     this.statusBarItem = null;
     this.statusInterval = null;
     this.debouncedUpload = this.debounce(async (file) => {
@@ -867,7 +934,8 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     this.statusBarItem = this.addStatusBarItem();
     this.statusBarItem.addClass("dropbox-sync-status-bar");
     this.updateStatusBar("idle");
-    this.addSettingTab(new SettingsTab(this.app, this));
+    this.settingTab = new SettingsTab(this.app, this);
+    this.addSettingTab(this.settingTab);
     this.registerCommands();
     this.registerEventHooks();
     this.initSyncEngine();
@@ -934,6 +1002,64 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     await this.saveSettings();
     (_a = this.syncEngine) == null ? void 0 : _a.cancel();
     this.syncEngine = null;
+  }
+  // ─── Config Export / Import ──────────────────────────────────────────────
+  /**
+   * 序列化当前配置到 JSON 字符串并复制到剪贴板。
+   */
+  async exportConfigToClipboard() {
+    const exportData = {};
+    for (const [key, value] of Object.entries(this.settings)) {
+      exportData[key] = value;
+    }
+    const jsonStr = JSON.stringify(exportData, null, 2);
+    try {
+      await navigator.clipboard.writeText(jsonStr);
+      new import_obsidian4.Notice("\u2705 \u914D\u7F6E\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F", 3e3);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      new import_obsidian4.Notice(`\u274C \u590D\u5236\u5931\u8D25\uFF1A${msg}`, 5e3);
+    }
+  }
+  /**
+   * 从 JSON 字符串导入配置并应用。
+   * @param jsonStr 用户粘贴的 JSON 字符串
+   * @returns 导入是否成功
+   */
+  async importConfig(jsonStr) {
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonStr);
+    } catch (e) {
+      new import_obsidian4.Notice("\u274C \u914D\u7F6E\u683C\u5F0F\u9519\u8BEF\uFF1A\u4E0D\u662F\u6709\u6548\u7684 JSON", 5e3);
+      return false;
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      new import_obsidian4.Notice("\u274C \u914D\u7F6E\u683C\u5F0F\u9519\u8BEF\uFF1A\u9700\u8981 JSON \u5BF9\u8C61", 5e3);
+      return false;
+    }
+    const errors = [];
+    if (parsed.clientId !== void 0 && typeof parsed.clientId !== "string") {
+      errors.push("clientId \u5E94\u4E3A\u5B57\u7B26\u4E32");
+    }
+    if (parsed.syncDirection !== void 0 && !["upload", "download", "two-way"].includes(parsed.syncDirection)) {
+      errors.push("syncDirection \u5E94\u4E3A upload / download / two-way");
+    }
+    if (parsed.maxFileSize !== void 0 && typeof parsed.maxFileSize !== "number") {
+      errors.push("maxFileSize \u5E94\u4E3A\u6570\u5B57");
+    }
+    if (parsed.syncOnSave !== void 0 && typeof parsed.syncOnSave !== "boolean") {
+      errors.push("syncOnSave \u5E94\u4E3A\u5E03\u5C14\u503C");
+    }
+    if (errors.length > 0) {
+      new import_obsidian4.Notice(`\u274C \u914D\u7F6E\u6821\u9A8C\u5931\u8D25\uFF1A${errors.join("\uFF1B")}`, 8e3);
+      return false;
+    }
+    Object.assign(this.settings, DEFAULT_SETTINGS, parsed);
+    await this.saveSettings();
+    this.reloadSyncEngine();
+    new import_obsidian4.Notice("\u2705 \u914D\u7F6E\u5BFC\u5165\u6210\u529F", 3e3);
+    return true;
   }
   // ─── Commands ────────────────────────────────────────────────────────────
   registerCommands() {

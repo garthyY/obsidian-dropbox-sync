@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import { App, Modal, PluginSettingTab, Setting, Notice } from "obsidian";
 import DropboxSyncPlugin from "./main";
 import { isTokenValid, loadToken } from "./dropbox-auth";
 
@@ -39,6 +39,76 @@ export const DEFAULT_SETTINGS: DropboxSyncSettings = {
 	remoteCursor: null,
 	incrementalCount: 0,
 };
+
+// ─── Import Modal ────────────────────────────────────────────────────────────
+
+/**
+ * 导入配置的模态对话框 — 粘贴 JSON 后点击导入。
+ */
+class ImportModal extends Modal {
+	private plugin: DropboxSyncPlugin;
+
+	constructor(app: App, plugin: DropboxSyncPlugin) {
+		super(app);
+		this.plugin = plugin;
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		contentEl.createEl("h2", { text: "导入配置" });
+
+		contentEl.createEl("p", {
+			text: "请粘贴之前导出的配置 JSON（包含 App Key、Token 等全部设置）",
+		});
+
+		const textarea = contentEl.createEl("textarea", {
+			attr: {
+				rows: "12",
+				style: "width: 100%; font-family: monospace; font-size: 13px; box-sizing: border-box; resize: vertical;",
+				placeholder: "在此粘贴配置 JSON …",
+			},
+		});
+
+		const btnContainer = contentEl.createDiv({
+			attr: { style: "display: flex; gap: 8px; margin-top: 12px;" },
+		});
+
+		const importBtn = btnContainer.createEl("button", {
+			text: "📥 导入",
+			attr: { style: "flex: 1; cursor: pointer;" },
+		});
+		importBtn.addEventListener("click", async () => {
+			const jsonStr = textarea.value.trim();
+			if (!jsonStr) {
+				new Notice("请先粘贴配置 JSON");
+				return;
+			}
+			importBtn.disabled = true;
+			importBtn.textContent = "导入中…";
+			const ok = await this.plugin.importConfig(jsonStr);
+			if (ok) {
+				this.close();
+				// 刷新设置面板
+				this.plugin.settingTab?.display();
+			} else {
+				importBtn.disabled = false;
+				importBtn.textContent = "📥 导入";
+			}
+		});
+
+		const cancelBtn = btnContainer.createEl("button", {
+			text: "取消",
+			attr: { style: "flex: 1; cursor: pointer;" },
+		});
+		cancelBtn.addEventListener("click", () => this.close());
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
 
 // ─── Settings Tab ────────────────────────────────────────────────────────────
 
@@ -238,6 +308,32 @@ export class SettingsTab extends PluginSettingTab {
 						new Notice("同步已取消");
 					});
 			});
+
+			// ── 配置导入导出 ──────────────────────────────────────────────────
+
+			containerEl.createEl("h3", { text: "配置导入导出" });
+
+			new Setting(containerEl)
+				.setName("导出配置到剪贴板")
+				.setDesc("将当前所有设置（包括 Token）复制到剪贴板，可在另一台设备上导入")
+				.addButton((btn) =>
+					btn.setButtonText("📋 导出配置")
+						.setCta()
+						.onClick(async () => {
+							await this.plugin.exportConfigToClipboard();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("从剪贴板导入配置")
+				.setDesc("粘贴之前导出的 JSON 配置，覆盖当前所有设置")
+				.addButton((btn) =>
+					btn.setButtonText("📥 导入配置")
+						.onClick(() => {
+							const modal = new ImportModal(this.app, this.plugin);
+							modal.open();
+						}),
+				);
 
 			// ── 设置说明 ──────────────────────────────────────────────────────
 

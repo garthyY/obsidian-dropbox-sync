@@ -1,6 +1,6 @@
 # Obsidian Dropbox Sync
 
-一款 Obsidian 插件，通过 Dropbox 自动同步你的笔记库。同时可作为独立同步方案，方便在没有 Obsidian 的环境下访问笔记。
+一款 Obsidian 插件，通过 Dropbox 自动同步你的笔记库。
 
 ## 功能
 

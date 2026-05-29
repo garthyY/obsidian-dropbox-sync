@@ -20,6 +20,7 @@ import { DropboxSyncSettings, DEFAULT_SETTINGS, SettingsTab } from "./settings";
 export default class DropboxSyncPlugin extends Plugin {
 	settings: DropboxSyncSettings = DEFAULT_SETTINGS;
 	syncEngine: SyncEngine | null = null;
+	settingTab: SettingsTab | null = null;
 	private statusBarItem: HTMLElement | null = null;
 	private statusInterval: number | null = null;
 
@@ -34,7 +35,8 @@ export default class DropboxSyncPlugin extends Plugin {
 		this.updateStatusBar("idle");
 
 		// Settings tab
-		this.addSettingTab(new SettingsTab(this.app, this));
+		this.settingTab = new SettingsTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		// Commands
 		this.registerCommands();
@@ -115,6 +117,79 @@ export default class DropboxSyncPlugin extends Plugin {
 		await this.saveSettings();
 		this.syncEngine?.cancel();
 		this.syncEngine = null;
+	}
+
+	// ─── Config Export / Import ──────────────────────────────────────────────
+
+	/**
+	 * 序列化当前配置到 JSON 字符串并复制到剪贴板。
+	 */
+	async exportConfigToClipboard(): Promise<void> {
+		const exportData: Record<string, unknown> = {};
+
+		// 导出所有 settings 字段
+		for (const [key, value] of Object.entries(this.settings)) {
+			exportData[key] = value;
+		}
+
+		const jsonStr = JSON.stringify(exportData, null, 2);
+
+		try {
+			await navigator.clipboard.writeText(jsonStr);
+			new Notice("✅ 配置已复制到剪贴板", 3000);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`❌ 复制失败：${msg}`, 5000);
+		}
+	}
+
+	/**
+	 * 从 JSON 字符串导入配置并应用。
+	 * @param jsonStr 用户粘贴的 JSON 字符串
+	 * @returns 导入是否成功
+	 */
+	async importConfig(jsonStr: string): Promise<boolean> {
+		let parsed: Record<string, unknown>;
+		try {
+			parsed = JSON.parse(jsonStr);
+		} catch {
+			new Notice("❌ 配置格式错误：不是有效的 JSON", 5000);
+			return false;
+		}
+
+		if (typeof parsed !== "object" || parsed === null) {
+			new Notice("❌ 配置格式错误：需要 JSON 对象", 5000);
+			return false;
+		}
+
+		// 类型校验
+		const errors: string[] = [];
+		if (parsed.clientId !== undefined && typeof parsed.clientId !== "string") {
+			errors.push("clientId 应为字符串");
+		}
+		if (parsed.syncDirection !== undefined && !["upload", "download", "two-way"].includes(parsed.syncDirection as string)) {
+			errors.push("syncDirection 应为 upload / download / two-way");
+		}
+		if (parsed.maxFileSize !== undefined && typeof parsed.maxFileSize !== "number") {
+			errors.push("maxFileSize 应为数字");
+		}
+		if (parsed.syncOnSave !== undefined && typeof parsed.syncOnSave !== "boolean") {
+			errors.push("syncOnSave 应为布尔值");
+		}
+
+		if (errors.length > 0) {
+			new Notice(`❌ 配置校验失败：${errors.join("；")}`, 8000);
+			return false;
+		}
+
+		// 合入当前设置
+		Object.assign(this.settings, DEFAULT_SETTINGS, parsed);
+		await this.saveSettings();
+
+		// 重载引擎
+		this.reloadSyncEngine();
+		new Notice("✅ 配置导入成功", 3000);
+		return true;
 	}
 
 	// ─── Commands ────────────────────────────────────────────────────────────
