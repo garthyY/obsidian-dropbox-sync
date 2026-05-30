@@ -14,6 +14,7 @@ import {
 	DropboxAuthConfig,
 } from "./dropbox-auth";
 import { DropboxSyncSettings, DEFAULT_SETTINGS, SettingsTab } from "./settings";
+import * as path from "path";
 
 // ─── Plugin ──────────────────────────────────────────────────────────────────
 
@@ -67,15 +68,22 @@ export default class DropboxSyncPlugin extends Plugin {
 			return;
 		}
 
+		// 通过 Vault Adapter 获取插件目录
+		// adapter.getBasePath() 返回仓库根目录，拼接 .obsidian/plugins/<id>
+		const adapter = (this.app.vault.adapter as any);
+		const basePath: string | undefined = adapter?.getBasePath?.();
+		const pluginDir = basePath
+			? path.join(basePath, this.app.vault.configDir || ".obsidian", "plugins", this.manifest.id)
+			: __dirname;
+		const stateFilePath = path.join(pluginDir, "state.json");
+		console.log("Dropbox Sync: 状态文件路径:", stateFilePath);
 		this.syncEngine = new SyncEngine(this.app.vault, token, {
 			direction: this.settings.syncDirection as SyncDirection,
 			remoteBasePath: this.settings.remotePath,
 			localPrefix: this.settings.localPrefix,
 			maxFileSize: this.settings.maxFileSize,
 			clientId: this.settings.clientId,
-			lastSyncAt: this.settings.lastSyncAt ?? 0,
-			remoteCursor: this.settings.remoteCursor ?? null,
-			incrementalCount: this.settings.incrementalCount ?? 0,
+			stateFilePath,
 		});
 	}
 
@@ -205,16 +213,9 @@ export default class DropboxSyncPlugin extends Plugin {
 				}
 				try {
 					const result = await this.syncEngine.syncNow();
-					// 保存增量同步状态
 					this.settings.lastSyncAt = result.lastSyncAt;
-					this.settings.remoteCursor = result.remoteCursor;
-					this.settings.incrementalCount = result.incrementalCount;
 					await this.saveSettings();
-					console.log("Dropbox Sync: 同步状态已保存", {
-						lastSyncAt: new Date(result.lastSyncAt).toISOString(),
-						fullScanDone: result.fullScanDone,
-						incrementalCount: result.incrementalCount,
-					});
+					console.log("Dropbox Sync: 同步完成", result);
 					this.refreshStatusBar();
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);

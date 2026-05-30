@@ -19,12 +19,8 @@ export interface DropboxSyncSettings {
 	maxFileSize: number;
 	/** Auto-sync on file save */
 	syncOnSave: boolean;
-	/** Last successful sync timestamp (ms) — for incremental sync */
+	/** Last successful sync timestamp (ms) */
 	lastSyncAt: number;
-	/** Dropbox list_folder cursor for incremental remote scan */
-	remoteCursor: string | null;
-	/** 增量同步计数器，满 10 次触发全量兜底 */
-	incrementalCount: number;
 }
 
 export const DEFAULT_SETTINGS: DropboxSyncSettings = {
@@ -36,8 +32,6 @@ export const DEFAULT_SETTINGS: DropboxSyncSettings = {
 	maxFileSize: 50 * 1024 * 1024, // 50 MB
 	syncOnSave: true,
 	lastSyncAt: 0,
-	remoteCursor: null,
-	incrementalCount: 0,
 };
 
 // ─── Import Modal ────────────────────────────────────────────────────────────
@@ -286,8 +280,6 @@ export class SettingsTab extends PluginSettingTab {
 							btn.setButtonText("同步中…");
 							const result = await this.plugin.syncEngine.syncNow();
 							this.plugin.settings.lastSyncAt = result.lastSyncAt;
-							this.plugin.settings.remoteCursor = result.remoteCursor;
-							this.plugin.settings.incrementalCount = result.incrementalCount;
 							await this.plugin.saveSettings();
 							new Notice("同步完成！");
 						} catch (err) {

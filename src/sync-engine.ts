@@ -4,6 +4,7 @@ import {
 	isTokenExpired,
 	refreshToken,
 } from "./dropbox-auth";
+import * as fs from "fs";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -15,12 +16,8 @@ export interface SyncOptions {
 	localPrefix: string;
 	maxFileSize: number;
 	clientId: string;
-	/** 上次同步时间戳 — 增量模式按此过滤 */
-	lastSyncAt: number;
-	/** Dropbox list_folder 游标 — 增量模式复用 */
-	remoteCursor: string | null;
-	/** 增量同步计数 */
-	incrementalCount: number;
+	/** 本地状态文件路径（如 /path/to/plugins/obsidian-dropbox-sync/state.json）*/
+	stateFilePath: string;
 }
 
 export interface SyncStatus {
@@ -30,12 +27,21 @@ export interface SyncStatus {
 	progress: { total: number; completed: number; current: string };
 }
 
-/** 同步完成后回调 — 让调用方保存 lastSyncAt / cursor */
 export interface SyncResult {
 	lastSyncAt: number;
-	remoteCursor: string | null;
-	incrementalCount: number;
-	fullScanDone: boolean;
+	actionsCompleted: number;
+}
+
+// ─── 状态文件类型 ───────────────────────────────────────────────────────────
+
+export interface FileStateEntry {
+	v: number;       // 版本号
+	exists: boolean; // 文件是否存在
+	h: string;       // 内容哈希（SHA-256 hex）
+}
+
+export interface SyncState {
+	files: Record<string, FileStateEntry>;
 }
 
 // ─── Dropbox API Response Types ──────────────────────────────────────────────
@@ -68,6 +74,10 @@ interface ListFolderResult {
 	has_more: boolean;
 }
 
+// ─── 常量 ─────────────────────────────────────────────────────────────────────
+
+const REMOTE_STATE_FILENAME = ".sync_state.json";
+
 // ─── Sync Engine ─────────────────────────────────────────────────────────────
 
 export class SyncEngine {
@@ -93,8 +103,6 @@ export class SyncEngine {
 		console.log("Dropbox Sync: SyncEngine 创建", {
 			direction: options.direction,
 			remoteBasePath: this.options.remoteBasePath,
-			lastSyncAt: options.lastSyncAt ? new Date(options.lastSyncAt).toISOString() : "首次",
-			incrementalCount: options.incrementalCount,
 		});
 	}
 
@@ -110,7 +118,6 @@ export class SyncEngine {
 		this.token = token;
 	}
 
-	/** 返回当前 sync options 供保存 */
 	getOptions(): SyncOptions {
 		return { ...this.options };
 	}
@@ -128,19 +135,12 @@ export class SyncEngine {
 		this.status.lastError = null;
 		this.status.progress = { total: 0, completed: 0, current: "正在启动…" };
 
-		// 判断是否该做全量扫描兜底
-		const needsFullScan =
-			this.options.lastSyncAt === 0 ||
-			this.options.incrementalCount >= 10;
-
 		console.log("Dropbox Sync: === 开始同步 ===");
 		console.log("Dropbox Sync: 方向:", this.options.direction);
-		console.log("Dropbox Sync: 模式:", needsFullScan ? "全量" : "增量");
-		console.log("Dropbox Sync: 增量计数:", this.options.incrementalCount);
 
 		try {
 			await this.ensureValidToken();
-			const result = await this.runSync(needsFullScan);
+			const result = await this.runSync();
 
 			this.status.lastSyncAt = Date.now();
 			console.log("Dropbox Sync: === 同步完成 ===");
@@ -162,7 +162,7 @@ export class SyncEngine {
 		console.log("Dropbox Sync: 用户取消了同步");
 		if (this.abortController) {
 			this.abortController.abort();
-			this.abortController = null;
+			// 不置 null——后续 runSync 循环靠 ?.signal.aborted 检测取消
 		}
 		this.status.running = false;
 	}
@@ -171,7 +171,7 @@ export class SyncEngine {
 
 	async uploadFile(file: TFile): Promise<void> {
 		if (this.status.running) {
-			console.log("Dropbox Sync: 全量同步中，跳过保存时同步", file.path);
+			console.log("Dropbox Sync: 全量同步中，跳过保存时上传", file.path);
 			return;
 		}
 		try {
@@ -194,43 +194,69 @@ export class SyncEngine {
 
 	shouldSync(file: TAbstractFile): boolean {
 		if (file instanceof TFolder) return false;
-		const path = file.path;
-		if (this.options.localPrefix && !path.startsWith(this.options.localPrefix)) return false;
+		const p = file.path;
+		if (this.options.localPrefix && !p.startsWith(this.options.localPrefix)) return false;
 		const basename = file.name;
 		if (basename.startsWith(".")) return false;
 		if (basename === "desktop.ini") return false;
-		if (path.startsWith(".obsidian/")) return false;
-		// 跳过冲突副本文件
+		if (p.startsWith(".obsidian/")) return false;
+		if (p === ".obsidian") return false;
 		if (basename.includes(".conflict.")) return false;
+		// 跳过状态文件本身（当 vault 根目录恰好是插件目录时兜底）
+		if (basename === "state.json" && p.endsWith("/state.json")) return false;
 		return true;
 	}
 
-	// ─── 内部同步逻辑 ────────────────────────────────────────────────────────
+	// ─── 内部同步逻辑（状态文件驱动） ───────────────────────────────────────
 
-	private async runSync(needsFullScan: boolean): Promise<SyncResult> {
-		let remoteCursor: string | null = null;
+	private async runSync(): Promise<SyncResult> {
+		// 1. 确保远程目录存在
+		await this.createRemoteFolder();
 
-		// ── 1. 索引 ──────────────────────────────────────────────────────────
+		// 2. 加载本地状态
+		const localState = await this.loadLocalState();
+		console.log("Dropbox Sync: 本地状态文件已加载");
 
-		this.status.progress.current = "正在索引本地文件…";
-		console.time("Dropbox Sync: 索引本地");
-		const localFiles = await this.indexLocalFiles(needsFullScan ? 0 : this.options.lastSyncAt);
-		console.timeEnd("Dropbox Sync: 索引本地");
-		console.log("Dropbox Sync: 本地文件数:", localFiles.size);
+		// 3. 扫描本地文件 + 计算 hash + 检测变更 → 版本号推进
+		this.status.progress.current = "正在扫描本地文件…";
+		console.time("Dropbox Sync: 扫描本地");
+		const newLocalState = await this.detectLocalChanges(localState);
+		console.timeEnd("Dropbox Sync: 扫描本地");
+		console.log("Dropbox Sync: 本地文件数:", Object.keys(newLocalState.files).length);
 
-		this.status.progress.current = "正在索引远程文件…";
-		console.time("Dropbox Sync: 索引远程");
-		const remoteResult = await this.indexRemoteFiles(needsFullScan);
-		console.timeEnd("Dropbox Sync: 索引远程");
-		console.log("Dropbox Sync: 远程文件数:", remoteResult.files.size);
-		remoteCursor = remoteResult.cursor;
+		// 4. 下载远程状态
+		this.status.progress.current = "正在下载远程状态…";
+		console.time("Dropbox Sync: 下载远程状态");
+		let remoteState = await this.downloadRemoteState();
+		console.timeEnd("Dropbox Sync: 下载远程状态");
 
-		// ── 2. 对比 ──────────────────────────────────────────────────────────
+		if (!remoteState.files || Object.keys(remoteState.files).length === 0) {
+			// 远程无状态文件 → 枚举实际远程文件作为初始状态（兼容旧系统遗留文件）
+			console.log("Dropbox Sync: 远程无状态文件，扫描远程目录…");
+			remoteState = await this.listRemoteFilesToState();
+			if (remoteState.files && Object.keys(remoteState.files).length > 0) {
+				const remoteOnly = Object.keys(remoteState.files).filter(
+					p => !(p in (newLocalState.files || {})),
+				);
+				console.log(`Dropbox Sync: 发现 ${Object.keys(remoteState.files).length} 个远程文件（${remoteOnly.length} 个仅远程）`);
+			} else {
+				console.log("Dropbox Sync: 远程目录为空（全新开始）");
+			}
+		} else {
+			console.log(`Dropbox Sync: 远程状态包含 ${Object.keys(remoteState.files).length} 个文件`);
+		}
 
-		console.time("Dropbox Sync: 对比差异");
-		const actions = this.resolveActions(localFiles, remoteResult.files);
-		console.timeEnd("Dropbox Sync: 对比差异");
-		console.log("Dropbox Sync: 操作数:", actions.length);
+		// 过滤远程状态中不应同步的路径（如 .obsidian/）
+		const beforeFilterCount = Object.keys(remoteState.files || {}).length;
+		remoteState = this.filterStatePaths(remoteState);
+		const filteredCount = beforeFilterCount - Object.keys(remoteState.files || {}).length;
+		if (filteredCount > 0) {
+			console.log(`Dropbox Sync: 远程状态过滤了 ${filteredCount} 个不应同步的条目`);
+		}
+
+		// 5. 对比两端状态 → 决议操作
+		const actions = this.resolveStateActions(newLocalState, remoteState, this.options.direction);
+		console.log("Dropbox Sync: 待处理", actions.length, "个文件");
 		if (actions.length > 0) {
 			console.log("Dropbox Sync: 操作:", actions.map(a => `${a.action}:${a.path}`).join(", "));
 		}
@@ -238,269 +264,374 @@ export class SyncEngine {
 		this.status.progress.total = actions.length;
 		this.status.progress.completed = 0;
 
-		// ── 3. 执行 ──────────────────────────────────────────────────────────
-
+		// 6. 执行操作（每个操作成功后立即保存本地状态，避免中途崩溃丢状态）
 		for (const action of actions) {
 			if (this.abortController?.signal.aborted) {
 				throw new Error("同步已取消");
 			}
 			this.status.progress.current = action.path;
 			try {
-				await this.executeAction(action);
+				await this.executeAction(action, newLocalState, remoteState);
+				// 操作成功 → 立即保存本地状态，崩溃后下次同步能从中断点继续
+				await this.saveLocalState(this.mergeStates(newLocalState, remoteState));
+				console.log(`Dropbox Sync: [${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
 			} catch (err) {
 				console.error(`Dropbox Sync: 操作失败 ${action.action} ${action.path}:`, err);
 			}
 			this.status.progress.completed++;
 		}
 
-		// ── 4. 返回结果 ────────────────────────────────────────────────────
+		// 7. 合并两端状态（各路径取最高版本号）
+		const merged = this.mergeStates(newLocalState, remoteState);
 
-		const newIncrementalCount = needsFullScan ? 0 : this.options.incrementalCount + 1;
-		return {
-			lastSyncAt: Date.now(),
-			remoteCursor: remoteCursor ?? this.options.remoteCursor,
-			incrementalCount: newIncrementalCount,
-			fullScanDone: needsFullScan,
-		};
+		// 8. 保存本地状态（兜底）
+		await this.saveLocalState(merged);
+		console.log("Dropbox Sync: 本地状态已保存");
+
+		// 9. 上传远程状态到 Dropbox
+		try {
+			await this.uploadRemoteState(merged);
+			console.log("Dropbox Sync: 远程状态已上传");
+		} catch (err) {
+			console.error("Dropbox Sync: 远程状态上传失败（非致命）", err);
+		}
+
+		return { lastSyncAt: Date.now(), actionsCompleted: actions.length };
 	}
 
-	// ─── 索引本地（增量过滤） ─────────────────────────────────────────────
+	// ─── Hash ──────────────────────────────────────────────────────────────────
 
-	private async indexLocalFiles(since: number): Promise<Map<string, number>> {
-		const files = new Map<string, number>();
+	private async fileHash(content: ArrayBuffer): Promise<string> {
+		const hash = await crypto.subtle.digest("SHA-256", content);
+		return Array.from(new Uint8Array(hash))
+			.map(b => b.toString(16).padStart(2, "0"))
+			.join("");
+	}
+
+	// ─── 本地状态文件管理 ─────────────────────────────────────────────────
+
+	private async loadLocalState(): Promise<SyncState> {
+		try {
+			const content = fs.readFileSync(this.options.stateFilePath, "utf-8");
+			return JSON.parse(content);
+		} catch (err) {
+			if (err instanceof Error && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+				console.warn("Dropbox Sync: 读取本地状态文件失败", this.options.stateFilePath, err);
+			}
+			return { files: {} };
+		}
+	}
+
+	private async saveLocalState(state: SyncState): Promise<void> {
+		try {
+			fs.writeFileSync(this.options.stateFilePath, JSON.stringify(state, null, 2), "utf-8");
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.error("Dropbox Sync: 保存本地状态文件失败", this.options.stateFilePath, msg);
+			throw new Error(`无法写入状态文件 ${this.options.stateFilePath}: ${msg}`);
+		}
+	}
+
+	// ─── 远程状态文件管理 ────────────────────────────────────────────────
+
+	private remoteStatePath(): string {
+		const base = this.options.remoteBasePath.replace(/\/+$/, "");
+		return `${base}/${REMOTE_STATE_FILENAME}`;
+	}
+
+	private async downloadRemoteState(): Promise<SyncState> {
+		try {
+			const content = await this.dropboxDownload(this.remoteStatePath());
+			const text = new TextDecoder().decode(content);
+			return JSON.parse(text);
+		} catch {
+			return { files: {} };
+		}
+	}
+
+	private async uploadRemoteState(state: SyncState): Promise<void> {
+		const json = JSON.stringify(state, null, 2);
+		const encoded = new TextEncoder().encode(json);
+		const content = encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
+		try {
+			await this.dropboxUpload(this.remoteStatePath(), content);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.includes("not_found")) {
+				await this.createRemoteFolder();
+				await this.dropboxUpload(this.remoteStatePath(), content);
+			} else {
+				throw err;
+			}
+		}
+	}
+
+	private async listRemoteFilesToState(): Promise<SyncState> {
+		/** 首次同步 / 迁移时枚举远程实际文件，生成初始状态条目（v=1） */
+		const state: SyncState = { files: {} };
+		try {
+			let result = await this.dropboxListFolder(this.options.remoteBasePath);
+			let entries = result.entries;
+			let cursor = result.cursor;
+			let hasMore = result.has_more;
+
+			while (hasMore) {
+				result = await this.dropboxListFolderContinue(cursor);
+				entries = entries.concat(result.entries);
+				cursor = result.cursor;
+				hasMore = result.has_more;
+			}
+
+			for (const entry of entries) {
+				if (entry[".tag"] !== "file") continue;
+				const rel = this.relativeRemotePath(entry.path_lower);
+				if (rel === REMOTE_STATE_FILENAME) continue;
+				state.files[rel] = { v: 1, exists: true, h: "" };
+			}
+		} catch {
+			// 目录尚不存在
+		}
+		return state;
+	}
+
+	// ─── 本地文件扫描 + hash + 版本检测 ─────────────────────────────────
+
+	private async detectLocalChanges(oldState: SyncState): Promise<SyncState> {
+		/** 扫描本地文件，计算 hash，与旧状态比对 → 返回更新后的状态（版本号 + hash） */
+		const oldFiles = oldState.files || {};
+		const newFiles: Record<string, FileStateEntry> = {};
 		const allFiles = this.vault.getFiles();
 
 		for (const file of allFiles) {
 			if (!this.shouldSync(file)) continue;
+
 			const relPath = this.relativePath(file.path);
 
+			// 文件超过大小限制 → 跳过
+			if (this.options.maxFileSize > 0 && file.stat.size > this.options.maxFileSize) {
+				console.log("Dropbox Sync: 跳过超大文件", relPath);
+				continue;
+			}
+
+			let content: ArrayBuffer;
 			try {
-				const stat = await this.vault.adapter.stat(file.path);
-				const mtime = stat?.mtime ?? file.stat.mtime;
-				// 增量过滤
-				if (since > 0 && mtime <= since) continue;
-				files.set(relPath, mtime);
+				content = await this.vault.readBinary(file);
 			} catch (err) {
-				console.warn("Dropbox Sync: 读取文件失败", file.path, err);
+				console.warn("Dropbox Sync: 读取文件失败", relPath, err);
+				continue;
+			}
+
+			const h = await this.fileHash(content);
+			const oldEntry = oldFiles[relPath] || {};
+			const oldV = oldEntry.v || 0;
+			const oldHash = oldEntry.h || "";
+
+			if ((oldEntry.exists ?? true) && h === oldHash) {
+				// 内容未变 → 保持版本号
+				newFiles[relPath] = { v: oldV, exists: true, h };
+			} else {
+				// 新增或内容改变 → 版本号 +1
+				newFiles[relPath] = { v: oldV + 1, exists: true, h };
 			}
 		}
 
-		return files;
-	}
-
-	// ─── 索引远程（增量游标 / 全量） ─────────────────────────────────────
-
-	private async indexRemoteFiles(
-		fullScan: boolean,
-	): Promise<{
-		files: Map<string, { rev: string; modified: number; content_hash: string }>;
-		cursor: string | null;
-	}> {
-		const files = new Map<string, { rev: string; modified: number; content_hash: string }>();
-		let cursor: string | null = null;
-		let hasMore = true;
-		let pageCount = 0;
-
-		// 增量模式且有游标 → 从游标继续
-		const useCursor = !fullScan && !!this.options.remoteCursor;
-
-		while (hasMore) {
-			pageCount++;
-			let result: ListFolderResult;
-			try {
-				if (cursor) {
-					result = await this.dropboxListFolderContinue(cursor);
-				} else if (useCursor) {
-					// 增量：从上次游标继续
-					result = await this.dropboxListFolderContinue(this.options.remoteCursor!);
-					// 第一次调用后清空 remoteCursor 标记，后续分页用 cursor
+		// 处理被删除的文件
+		for (const [p, entry] of Object.entries(oldFiles)) {
+			if (!(p in newFiles)) {
+				if (entry.exists) {
+					newFiles[p] = { v: (entry.v || 0) + 1, exists: false, h: "" };
 				} else {
-					result = await this.dropboxListFolder(this.options.remoteBasePath);
-				}
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				if (msg.includes("409") && msg.includes("not_found")) {
-					console.log("Dropbox Sync: 远程目录不存在，自动创建");
-					await this.createRemoteFolder();
-					return { files, cursor: null };
-				}
-				console.error("Dropbox Sync: 索引远程失败", err);
-				throw err;
-			}
-
-			for (const entry of result.entries) {
-				if (entry[".tag"] === "file") {
-					const file = entry as DropboxFileMetadata;
-					const relPath = this.relativeRemotePath(file.path_lower);
-					files.set(relPath, {
-						rev: file.rev,
-						modified: new Date(file.server_modified).getTime(),
-						content_hash: file.content_hash,
-					});
+					newFiles[p] = entry; // 保持已删除状态的条目
 				}
 			}
-
-			cursor = result.cursor;
-			hasMore = result.has_more;
 		}
 
-		return { files, cursor };
+		return { files: newFiles };
 	}
 
-	// ─── 对比差异 + 冲突检测 ───────────────────────────────────────────
+	// ─── 过滤不应同步的路径 ──────────────────────────────────────────────
 
-	private resolveActions(
-		localFiles: Map<string, number>,
-		remoteFiles: Map<string, { rev: string; modified: number; content_hash: string }>,
-	): Array<{
-		path: string;
-		action: "upload" | "download" | "conflict-upload" | "delete-local" | "delete-remote";
-		conflictRemoteRev?: string;
-	}> {
-		const actions: Array<{
-			path: string;
-			action: "upload" | "download" | "conflict-upload" | "delete-local" | "delete-remote";
-			conflictRemoteRev?: string;
-		}> = [];
+	private filterStatePaths(state: SyncState): SyncState {
+		/** 移除状态中不应同步的条目（与 shouldSync 逻辑一致） */
+		const filtered: Record<string, FileStateEntry> = {};
+		for (const [relPath, entry] of Object.entries(state.files || {})) {
+			const parts = relPath.split("/");
+			const basename = parts.pop() || relPath;
 
-		const allPaths = new Set([...localFiles.keys(), ...remoteFiles.keys()]);
-		const dir = this.options.direction;
+			// 隐藏文件/目录（文件自身或任意父目录以 . 开头，如 .obsidian/）
+			if (basename.startsWith(".")) continue;
+			if (parts.some(p => p.startsWith("."))) continue;
+			// 系统文件
+			if (basename === "desktop.ini") continue;
+			// 冲突副本
+			if (basename.includes(".conflict.")) continue;
+			// 远程状态文件自身
+			if (basename === REMOTE_STATE_FILENAME) continue;
+
+			filtered[relPath] = entry;
+		}
+		return { files: filtered };
+	}
+
+	// ─── 版本号对比 → 决议操作 ────────────────────────────────────────
+
+	private resolveStateActions(
+		localState: SyncState,
+		remoteState: SyncState,
+		direction: SyncDirection,
+	): Array<{ path: string; action: "upload" | "download" | "delete" | "delete_local" }> {
+		const actions: Array<{ path: string; action: "upload" | "download" | "delete" | "delete_local" }> = [];
+		const localFiles = localState.files || {};
+		const remoteFiles = remoteState.files || {};
+		const allPaths = new Set([...Object.keys(localFiles), ...Object.keys(remoteFiles)]);
+
+		const hashMatch = (le: Partial<FileStateEntry>, re: Partial<FileStateEntry>): boolean => {
+			const lh = le.h || "";
+			const rh = re.h || "";
+			return !!(lh && rh && lh === rh);
+		};
 
 		for (const path of allPaths) {
-			const localMtime = localFiles.get(path) ?? null;
-			const remote = remoteFiles.get(path) ?? null;
-			const remoteMtime = remote?.modified ?? null;
+			const lEntry = localFiles[path] || {};
+			const rEntry = remoteFiles[path] || {};
+			const lv = lEntry.v || 0;
+			const rv = rEntry.v || 0;
+			const lExists = path in localFiles ? (lEntry.exists ?? true) : false;
+			const rExists = path in remoteFiles ? (rEntry.exists ?? true) : false;
 
-			// —— 只在一侧存在 ——
-			if (localMtime === null) {
-				if (dir === "download" || dir === "two-way") {
-					actions.push({ path, action: "download" });
+			if (direction === "upload") {
+				if (lv > rv) {
+					if (lExists && !hashMatch(lEntry, rEntry)) {
+						actions.push({ path, action: "upload" });
+					} else if (rExists && !lExists) {
+						actions.push({ path, action: "delete" });
+					}
+				} else if (rv > lv && !(path in localFiles) && rExists) {
+					actions.push({ path, action: "delete" });
 				}
-				continue;
-			}
-			if (remoteMtime === null) {
-				if (dir === "upload" || dir === "two-way") {
-					actions.push({ path, action: "upload" });
+			} else if (direction === "download") {
+				if (rv > lv) {
+					if (rExists && !hashMatch(lEntry, rEntry)) {
+						actions.push({ path, action: "download" });
+					} else if (lExists && !rExists) {
+						actions.push({ path, action: "delete_local" });
+					}
+				} else if (lv > rv && !(path in remoteFiles) && lExists) {
+					actions.push({ path, action: "delete_local" });
 				}
-				continue;
-			}
-
-			// —— 两侧都存在 ——
-			if (dir === "upload") {
-				if (localMtime > remoteMtime) actions.push({ path, action: "upload" });
-			} else if (dir === "download") {
-				if (remoteMtime > localMtime) actions.push({ path, action: "download" });
-			} else {
-				// 双向同步 + 冲突检测（加 1 秒缓冲防时钟偏差）
-				if (localMtime! > remoteMtime! && remoteMtime! > this.options.lastSyncAt + 1000) {
-					// 两侧都在上次同步后改过 → 冲突，保留远程副本
-					actions.push({ path, action: "conflict-upload", conflictRemoteRev: remote!.rev });
-					continue;
+			} else { // two-way
+				if (lv > rv) {
+					if (lExists && !hashMatch(lEntry, rEntry)) {
+						actions.push({ path, action: "upload" });
+					} else if (rExists && !lExists) {
+						actions.push({ path, action: "delete" });
+					}
+				} else if (rv > lv) {
+					if (rExists && !hashMatch(lEntry, rEntry)) {
+						actions.push({ path, action: "download" });
+					} else if (lExists && !rExists) {
+						actions.push({ path, action: "delete_local" });
+					}
 				}
-				if (localMtime > remoteMtime) {
-					actions.push({ path, action: "upload" });
-				} else if (remoteMtime > localMtime) {
-					actions.push({ path, action: "download" });
-				}
-				// mtime 相等 → 跳过
 			}
 		}
-
-		const priority = { upload: 0, "conflict-upload": 0, download: 1, "delete-local": 2, "delete-remote": 3 };
-		actions.sort((a, b) => priority[a.action] - priority[b.action]);
 
 		return actions;
 	}
 
-	// ─── 执行操作 ─────────────────────────────────────────────────────────
+	// ─── 合并两端状态 ────────────────────────────────────────────────────
+
+	private mergeStates(localState: SyncState, remoteState: SyncState): SyncState {
+		/** 合并两端状态：每个路径取最高版本号 */
+		const merged: SyncState = { files: {} };
+		const allPaths = new Set([
+			...Object.keys(localState.files || {}),
+			...Object.keys(remoteState.files || {}),
+		]);
+
+		for (const path of allPaths) {
+			const lEntry = (localState.files || {})[path] || {};
+			const rEntry = (remoteState.files || {})[path] || {};
+			const lv = lEntry.v || 0;
+			const rv = rEntry.v || 0;
+
+			merged.files[path] = lv >= rv ? lEntry : rEntry;
+		}
+
+		return merged;
+	}
+
+	// ─── 执行单个操作 ───────────────────────────────────────────────────
 
 	private async executeAction(
-		action: {
-			path: string;
-			action: "upload" | "download" | "conflict-upload" | "delete-local" | "delete-remote";
-			conflictRemoteRev?: string;
-		},
+		action: { path: string; action: "upload" | "download" | "delete" | "delete_local" },
+		localState: SyncState,
+		remoteState: SyncState,
 	): Promise<void> {
 		const localPath = this.remoteToLocal(action.path);
 		const remotePath = this.localToRemote(localPath);
 
-		switch (action.action) {
-			case "upload":
-			case "conflict-upload": {
-				const file = this.vault.getFileByPath(localPath);
-				if (!file) {
-					console.warn("Dropbox Sync: 上传时文件消失", localPath);
-					return;
-				}
+		if (action.action === "upload") {
+			const file = this.vault.getFileByPath(localPath);
+			if (!file) {
+				console.warn("Dropbox Sync: 上传时文件消失", localPath);
+				return;
+			}
+			const content = await this.vault.readBinary(file);
+			await this.dropboxUpload(remotePath, content);
 
-				// conflict-upload：先把远程旧版本下载为冲突副本
-				if (action.action === "conflict-upload" && action.conflictRemoteRev) {
-					console.log("Dropbox Sync: 冲突检测 —", localPath, "本地和远程都已修改");
-					try {
-						const conflictContent = await this.dropboxDownload(remotePath);
-						const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-						const conflictName = this.insertSuffix(localPath, `.conflict.${timestamp}`);
-						const parent = conflictName.substring(0, conflictName.lastIndexOf("/"));
-						if (parent && !(await this.vault.adapter.exists(parent))) {
-							await this.vault.createFolder(parent);
-						}
-						const existing = this.vault.getFileByPath(conflictName);
-						if (existing) {
-							await this.vault.modifyBinary(existing, conflictContent);
-						} else {
-							await this.vault.createBinary(conflictName, conflictContent);
-						}
-						console.log("Dropbox Sync: 冲突副本已保存", conflictName);
-					} catch (err) {
-						console.error("Dropbox Sync: 保存冲突副本失败", localPath, err);
-						// 继续上传本地版本
-					}
-				}
+			// 操作成功 → 更新远程状态条目
+			remoteState.files[action.path] = { ...(localState.files[action.path] || { v: 1, exists: true, h: "" }) };
 
-				// 上传本地版本覆盖远程
-				const content = await this.vault.readBinary(file);
-				await this.dropboxUpload(remotePath, content);
-				break;
+		} else if (action.action === "download") {
+			const content = await this.dropboxDownload(remotePath);
+			const h = await this.fileHash(content);
+
+			const parent = localPath.substring(0, localPath.lastIndexOf("/"));
+			if (parent && !(await this.vault.adapter.exists(parent))) {
+				await this.vault.createFolder(parent);
+			}
+			const existing = this.vault.getFileByPath(localPath);
+			if (existing) {
+				await this.vault.modifyBinary(existing, content);
+			} else {
+				await this.vault.createBinary(localPath, content);
 			}
 
-			case "download": {
-				const content = await this.dropboxDownload(remotePath);
-				const parent = localPath.substring(0, localPath.lastIndexOf("/"));
-				if (parent && !(await this.vault.adapter.exists(parent))) {
-					await this.vault.createFolder(parent);
-				}
-				const existing = this.vault.getFileByPath(localPath);
-				if (existing) {
-					await this.vault.modifyBinary(existing, content);
-				} else {
-					await this.vault.createBinary(localPath, content);
-				}
-				break;
-			}
+			// 操作成功 → 更新本地状态条目（补充 hash）
+			const rEntry = remoteState.files[action.path] || { v: 1, exists: true, h: "" };
+			localState.files[action.path] = { ...rEntry, h };
 
-			case "delete-local": {
-				const file = this.vault.getFileByPath(localPath);
-				if (file) await this.vault.delete(file, true);
-				break;
-			}
-
-			case "delete-remote": {
+		} else if (action.action === "delete") {
+			try {
 				await this.dropboxDelete(remotePath);
-				break;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				if (!msg.includes("not_found")) throw err;
+				// 远程已不存在 → 继续
+			}
+
+			const lv = (localState.files[action.path]?.v || 0);
+			const rv = (remoteState.files[action.path]?.v || 0);
+			const maxV = Math.max(lv, rv);
+			remoteState.files[action.path] = { v: maxV, exists: false, h: "" };
+			if (!(action.path in localState.files)) {
+				localState.files[action.path] = { v: maxV, exists: false, h: "" };
+			}
+
+		} else if (action.action === "delete_local") {
+			const file = this.vault.getFileByPath(localPath);
+			if (file) await this.vault.delete(file, true);
+
+			const lv = (localState.files[action.path]?.v || 0);
+			const rv = (remoteState.files[action.path]?.v || 0);
+			const maxV = Math.max(lv, rv);
+			localState.files[action.path] = { v: maxV, exists: false, h: "" };
+			if (!(action.path in remoteState.files)) {
+				remoteState.files[action.path] = { v: maxV, exists: false, h: "" };
 			}
 		}
 	}
-
-	// ─── 工具函数 ─────────────────────────────────────────────────────────
-
-	/** 在文件名中插入后缀，如 note.md → note.conflict.2024-01-01.md */
-	private insertSuffix(path: string, suffix: string): string {
-		const dot = path.lastIndexOf(".");
-		if (dot === -1) return path + suffix;
-		return path.slice(0, dot) + suffix + path.slice(dot);
-	}
-
-	// (冲突检测不再需要 hash 比对，Dropbox 的 content_hash 算法与标准 SHA-256 不兼容)
 
 	// ─── 路径工具 ──────────────────────────────────────────────────────────
 
@@ -544,8 +675,115 @@ export class SyncEngine {
 
 	// ─── Dropbox API ───────────────────────────────────────────────────────
 
+	/**
+	 * JSON API 调用（带 401 自动刷新 + 409 自动建目录）
+	 */
+	private async apiCall(url: string, body: string): Promise<{ status: number; text: string }> {
+		const attempt = async (): Promise<{ status: number; text: string }> => {
+			const response = await requestUrl({
+				url, method: "POST",
+				headers: {
+					"Authorization": `Bearer ${this.token.access_token}`,
+					"Content-Type": "application/json",
+				},
+				body, throw: false,
+			});
+
+			if (response.status === 401) {
+				// Token 过期 → 刷新后重试一次
+				console.log("Dropbox Sync: API 返回 401，自动刷新 token 后重试...");
+				await this.ensureValidToken();
+				const retry = await requestUrl({
+					url, method: "POST",
+					headers: {
+						"Authorization": `Bearer ${this.token.access_token}`,
+						"Content-Type": "application/json",
+					},
+					body, throw: false,
+				});
+				return { status: retry.status, text: retry.text };
+			}
+
+			return { status: response.status, text: response.text };
+		};
+
+		const result = await attempt();
+
+		if (result.status === 409) {
+			try {
+				const err = JSON.parse(result.text);
+				if (err?.error?.[".tag"] === "path" && err?.error?.path?.[".tag"] === "not_found") {
+					// 目录不存在 → 自动创建父目录后重试
+					const parsed = JSON.parse(body);
+					const parentPath = parsed.path?.split("/").slice(0, -1).join("/") || "";
+					if (parentPath) {
+						console.log("Dropbox Sync: 目录不存在，自动创建:", parentPath);
+						await this.createFolder(parentPath);
+						const retry = await attempt();
+						return retry;
+					}
+				}
+			} catch {
+				// JSON 解析失败 → 透传原错误
+			}
+		}
+
+		if (result.status >= 400) {
+			throw new Error(`Dropbox API 错误 (${result.status}): ${result.text}`);
+		}
+
+		return result;
+	}
+
+	/**
+	 * 二进制 API 调用（带 401 自动刷新）
+	 */
+	private async apiCallBinary(
+		url: string, body: ArrayBuffer | null, extraHeaders: Record<string, string>,
+	): Promise<{ arrayBuffer: () => Promise<ArrayBuffer>; status: number }> {
+		const attempt = async (): Promise<{ arrayBuffer: () => Promise<ArrayBuffer>; status: number }> => {
+			const headers = { "Authorization": `Bearer ${this.token.access_token}`, ...extraHeaders };
+			const response = await requestUrl({
+				url, method: "POST", headers,
+				body: body ?? undefined, throw: false,
+			});
+
+			if (response.status === 401) {
+				console.log("Dropbox Sync: 二进制 API 返回 401，自动刷新 token 后重试...");
+				await this.ensureValidToken();
+				const retryHeaders = { "Authorization": `Bearer ${this.token.access_token}`, ...extraHeaders };
+				const retry = await requestUrl({
+					url, method: "POST", headers: retryHeaders,
+					body: body ?? undefined, throw: false,
+				});
+				return {
+					arrayBuffer: () => Promise.resolve(retry.arrayBuffer),
+					status: retry.status,
+				};
+			}
+
+			return {
+				arrayBuffer: () => Promise.resolve(response.arrayBuffer),
+				status: response.status,
+			};
+		};
+
+		const result = await attempt();
+
+		if (result.status >= 400) {
+			throw new Error(`Dropbox API 错误 (${result.status})`);
+		}
+
+		return result;
+	}
+
 	private async dropboxListFolder(path: string, recursive = true): Promise<ListFolderResult> {
-		const body = JSON.stringify({ path, recursive, include_media_info: false, include_deleted: false, include_has_explicit_shared_members: false });
+		const body = JSON.stringify({
+			path, recursive,
+			include_media_info: false,
+			include_deleted: false,
+			include_has_explicit_shared_members: false,
+		});
 		const response = await this.apiCall("https://api.dropboxapi.com/2/files/list_folder", body);
 		return JSON.parse(response.text);
 	}
@@ -559,7 +797,9 @@ export class SyncEngine {
 	private async dropboxUpload(remotePath: string, content: ArrayBuffer): Promise<void> {
 		const headers: Record<string, string> = {
 			"Content-Type": "application/octet-stream",
-			"Dropbox-API-Arg": JSON.stringify({ path: remotePath, mode: "overwrite", autorename: false, mute: false }),
+			"Dropbox-API-Arg": JSON.stringify({
+				path: remotePath, mode: "overwrite", autorename: false, mute: false,
+			}),
 		};
 		await this.apiCallBinary("https://content.dropboxapi.com/2/files/upload", content, headers);
 	}
@@ -568,7 +808,9 @@ export class SyncEngine {
 		const headers: Record<string, string> = {
 			"Dropbox-API-Arg": JSON.stringify({ path: remotePath }),
 		};
-		const response = await this.apiCallBinary("https://content.dropboxapi.com/2/files/download", null, headers);
+		const response = await this.apiCallBinary(
+			"https://content.dropboxapi.com/2/files/download", null, headers,
+		);
 		return response.arrayBuffer();
 	}
 
@@ -577,42 +819,26 @@ export class SyncEngine {
 		await this.apiCall("https://api.dropboxapi.com/2/files/delete_v2", body);
 	}
 
-	private async createRemoteFolder(): Promise<void> {
-		const body = JSON.stringify({ path: this.options.remoteBasePath, autorename: false });
+	private async createFolder(dirPath: string): Promise<void> {
+		const body = JSON.stringify({ path: dirPath, autorename: false });
 		try {
 			await this.apiCall("https://api.dropboxapi.com/2/files/create_folder_v2", body);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			if (!msg.includes("409")) throw err;
+			if (!msg.includes("409") && !msg.includes("conflict")) throw err;
 		}
 	}
 
-	// ─── HTTP ──────────────────────────────────────────────────────────────
-
-	private async apiCall(url: string, body: string): Promise<{ status: number; text: string }> {
-		console.log("Dropbox Sync: API", url);
-		const response = await requestUrl({
-			url, method: "POST",
-			headers: { "Authorization": `Bearer ${this.token.access_token}`, "Content-Type": "application/json" },
-			body, throw: false,
-		});
-		if (response.status >= 400) {
-			throw new Error(`Dropbox API 错误 (${response.status}): ${response.text}`);
-		}
-		return { status: response.status, text: response.text };
+	private async createRemoteFolder(): Promise<void> {
+		await this.createFolder(this.options.remoteBasePath);
 	}
 
-	private async apiCallBinary(
-		url: string, body: ArrayBuffer | null, extraHeaders: Record<string, string>,
-	): Promise<{ arrayBuffer: () => Promise<ArrayBuffer> }> {
-		const headers = { "Authorization": `Bearer ${this.token.access_token}`, ...extraHeaders };
-		const response = await requestUrl({
-			url, method: "POST", headers,
-			body: body ?? undefined, throw: false,
-		});
-		if (response.status >= 400) {
-			throw new Error(`Dropbox API 错误 (${response.status}): ${response.text}`);
-		}
-		return { arrayBuffer: () => Promise.resolve(response.arrayBuffer) };
+	// ─── 工具 ─────────────────────────────────────────────────────────────
+
+	/** 在文件名中插入后缀（保留扩展名），如 note.md → note.suffix.md */
+	private insertSuffix(filePath: string, suffix: string): string {
+		const dot = filePath.lastIndexOf(".");
+		if (dot === -1) return filePath + suffix;
+		return filePath.slice(0, dot) + suffix + filePath.slice(dot);
 	}
 }
