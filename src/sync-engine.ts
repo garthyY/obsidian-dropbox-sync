@@ -74,6 +74,26 @@ interface ListFolderResult {
 	has_more: boolean;
 }
 
+// ─── 日志缓冲区 ─────────────────────────────────────────────────────────────
+
+const MAX_LOG_LINES = 500;
+const _logBuffer: string[] = [];
+
+export function addLog(msg: string): void {
+	const entry = `[${new Date().toLocaleTimeString()}] ${msg}`;
+	_logBuffer.push(entry);
+	if (_logBuffer.length > MAX_LOG_LINES) _logBuffer.shift();
+	console.log("Dropbox Sync:", msg);
+}
+
+export function getLogs(): string[] {
+	return [..._logBuffer];
+}
+
+export function clearLogs(): void {
+	_logBuffer.length = 0;
+}
+
 // ─── 常量 ─────────────────────────────────────────────────────────────────────
 
 const REMOTE_STATE_FILENAME = ".sync_state.json";
@@ -100,10 +120,10 @@ export class SyncEngine {
 			lastError: null,
 			progress: { total: 0, completed: 0, current: "" },
 		};
-		console.log("Dropbox Sync: SyncEngine 创建", {
+		addLog("SyncEngine 创建: " + JSON.stringify({
 			direction: options.direction,
 			remoteBasePath: this.options.remoteBasePath,
-		});
+		}));
 	}
 
 	getStatus(): SyncStatus {
@@ -135,15 +155,15 @@ export class SyncEngine {
 		this.status.lastError = null;
 		this.status.progress = { total: 0, completed: 0, current: "正在启动…" };
 
-		console.log("Dropbox Sync: === 开始同步 ===");
-		console.log("Dropbox Sync: 方向:", this.options.direction);
+		addLog("=== 开始同步 ===");
+		addLog(`方向: ${this.options.direction}`);
 
 		try {
 			await this.ensureValidToken();
 			const result = await this.runSync();
 
 			this.status.lastSyncAt = Date.now();
-			console.log("Dropbox Sync: === 同步完成 ===");
+			addLog("=== 同步完成 ===");
 			new Notice("Dropbox 同步完成");
 			return result;
 		} catch (err) {
@@ -159,7 +179,7 @@ export class SyncEngine {
 	}
 
 	cancel(): void {
-		console.log("Dropbox Sync: 用户取消了同步");
+		addLog("用户取消了同步");
 		if (this.abortController) {
 			this.abortController.abort();
 			// 不置 null——后续 runSync 循环靠 ?.signal.aborted 检测取消
@@ -171,7 +191,7 @@ export class SyncEngine {
 
 	async uploadFile(file: TFile): Promise<void> {
 		if (this.status.running) {
-			console.log("Dropbox Sync: 全量同步中，跳过保存时上传", file.path);
+			addLog(`全量同步中，跳过保存时上传 ${file.path}`);
 			return;
 		}
 		try {
@@ -181,11 +201,11 @@ export class SyncEngine {
 			const content = await this.vault.readBinary(file);
 
 			if (this.options.maxFileSize > 0 && content.byteLength > this.options.maxFileSize) {
-				console.log("Dropbox Sync: 文件超过大小限制", localPath);
+				addLog(`文件超过大小限制 ${localPath}`);
 				return;
 			}
 
-			console.log("Dropbox Sync: 保存时上传", localPath);
+			addLog(`保存时上传 ${localPath}`);
 			await this.dropboxUpload(remotePath, content);
 		} catch (err) {
 			console.error(`Dropbox Sync: 保存时上传失败 ${file.path}:`, err);
@@ -215,35 +235,36 @@ export class SyncEngine {
 
 		// 2. 加载本地状态
 		const localState = await this.loadLocalState();
-		console.log("Dropbox Sync: 本地状态文件已加载");
+		addLog("本地状态文件已加载");
 
 		// 3. 扫描本地文件 + 计算 hash + 检测变更 → 版本号推进
+		addLog("开始扫描本地文件，计算 SHA-256 哈希…");
 		this.status.progress.current = "正在扫描本地文件…";
-		console.time("Dropbox Sync: 扫描本地");
+		// 扫描在手机上可能较慢（SHA-256）
 		const newLocalState = await this.detectLocalChanges(localState);
-		console.timeEnd("Dropbox Sync: 扫描本地");
-		console.log("Dropbox Sync: 本地文件数:", Object.keys(newLocalState.files).length);
+		addLog("扫描完成");
+		addLog("本地文件数: " + Object.keys(newLocalState.files).length);
 
 		// 4. 下载远程状态
 		this.status.progress.current = "正在下载远程状态…";
-		console.time("Dropbox Sync: 下载远程状态");
+		addLog("下载远程状态…");
 		let remoteState = await this.downloadRemoteState();
-		console.timeEnd("Dropbox Sync: 下载远程状态");
+		addLog("远程状态下载完成");
 
 		if (!remoteState.files || Object.keys(remoteState.files).length === 0) {
 			// 远程无状态文件 → 枚举实际远程文件作为初始状态（兼容旧系统遗留文件）
-			console.log("Dropbox Sync: 远程无状态文件，扫描远程目录…");
+			addLog("远程无状态文件，扫描远程目录…");
 			remoteState = await this.listRemoteFilesToState();
 			if (remoteState.files && Object.keys(remoteState.files).length > 0) {
 				const remoteOnly = Object.keys(remoteState.files).filter(
 					p => !(p in (newLocalState.files || {})),
 				);
-				console.log(`Dropbox Sync: 发现 ${Object.keys(remoteState.files).length} 个远程文件（${remoteOnly.length} 个仅远程）`);
+				addLog(`发现 ${Object.keys(remoteState.files).length} 个远程文件（${remoteOnly.length} 个仅远程）`);
 			} else {
-				console.log("Dropbox Sync: 远程目录为空（全新开始）");
+				addLog("远程目录为空（全新开始）");
 			}
 		} else {
-			console.log(`Dropbox Sync: 远程状态包含 ${Object.keys(remoteState.files).length} 个文件`);
+			addLog(`远程状态包含 ${Object.keys(remoteState.files).length} 个文件`);
 		}
 
 		// 过滤远程状态中不应同步的路径（如 .obsidian/）
@@ -251,14 +272,14 @@ export class SyncEngine {
 		remoteState = this.filterStatePaths(remoteState);
 		const filteredCount = beforeFilterCount - Object.keys(remoteState.files || {}).length;
 		if (filteredCount > 0) {
-			console.log(`Dropbox Sync: 远程状态过滤了 ${filteredCount} 个不应同步的条目`);
+			addLog(`远程状态过滤了 ${filteredCount} 个不应同步的条目`);
 		}
 
 		// 5. 对比两端状态 → 决议操作
 		const actions = this.resolveStateActions(newLocalState, remoteState, this.options.direction);
-		console.log("Dropbox Sync: 待处理", actions.length, "个文件");
+		addLog(`待处理 ${actions.length} 个文件`);
 		if (actions.length > 0) {
-			console.log("Dropbox Sync: 操作:", actions.map(a => `${a.action}:${a.path}`).join(", "));
+			addLog(`操作: ${actions.map(a => `${a.action}:${a.path}`).join(", ")}`);
 		}
 
 		this.status.progress.total = actions.length;
@@ -274,7 +295,7 @@ export class SyncEngine {
 				await this.executeAction(action, newLocalState, remoteState);
 				// 操作成功 → 立即保存本地状态，崩溃后下次同步能从中断点继续
 				await this.saveLocalState(this.mergeStates(newLocalState, remoteState));
-				console.log(`Dropbox Sync: [${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
+				addLog(`[${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
 			} catch (err) {
 				console.error(`Dropbox Sync: 操作失败 ${action.action} ${action.path}:`, err);
 			}
@@ -286,12 +307,12 @@ export class SyncEngine {
 
 		// 8. 保存本地状态（兜底）
 		await this.saveLocalState(merged);
-		console.log("Dropbox Sync: 本地状态已保存");
+		addLog("本地状态已保存");
 
 		// 9. 上传远程状态到 Dropbox
 		try {
 			await this.uploadRemoteState(merged);
-			console.log("Dropbox Sync: 远程状态已上传");
+			addLog("远程状态已上传");
 		} catch (err) {
 			console.error("Dropbox Sync: 远程状态上传失败（非致命）", err);
 		}
@@ -433,7 +454,7 @@ export class SyncEngine {
 
 			// 文件超过大小限制 → 跳过
 			if (this.options.maxFileSize > 0 && file.stat.size > this.options.maxFileSize) {
-				console.log("Dropbox Sync: 跳过超大文件", relPath);
+				addLog(`跳过超大文件 ${relPath}`);
 				continue;
 			}
 
@@ -691,9 +712,9 @@ export class SyncEngine {
 
 	private async ensureValidToken(): Promise<void> {
 		if (isTokenExpired(this.token)) {
-			console.log("Dropbox Sync: token 过期，刷新…");
+			addLog("token 过期，刷新…");
 			this.token = await refreshToken(this.options.clientId, this.token);
-			console.log("Dropbox Sync: token 刷新成功");
+			addLog("token 刷新成功");
 		}
 	}
 
@@ -715,7 +736,7 @@ export class SyncEngine {
 
 			if (response.status === 401) {
 				// Token 过期 → 刷新后重试一次
-				console.log("Dropbox Sync: API 返回 401，自动刷新 token 后重试...");
+				addLog("API 返回 401，自动刷新 token 后重试...");
 				await this.ensureValidToken();
 				const retry = await requestUrl({
 					url, method: "POST",
@@ -741,7 +762,7 @@ export class SyncEngine {
 					const parsed = JSON.parse(body);
 					const parentPath = parsed.path?.split("/").slice(0, -1).join("/") || "";
 					if (parentPath) {
-						console.log("Dropbox Sync: 目录不存在，自动创建:", parentPath);
+						addLog("目录不存在，自动创建: " + parentPath);
 						await this.createFolder(parentPath);
 						const retry = await attempt();
 						return retry;
@@ -773,7 +794,7 @@ export class SyncEngine {
 			});
 
 			if (response.status === 401) {
-				console.log("Dropbox Sync: 二进制 API 返回 401，自动刷新 token 后重试...");
+				addLog("二进制 API 返回 401，自动刷新 token 后重试...");
 				await this.ensureValidToken();
 				const retryHeaders = { "Authorization": `Bearer ${this.token.access_token}`, ...extraHeaders };
 				const retry = await requestUrl({

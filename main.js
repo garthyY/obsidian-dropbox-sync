@@ -242,6 +242,21 @@ function openUrl(url) {
 }
 
 // src/sync-engine.ts
+var MAX_LOG_LINES = 500;
+var _logBuffer = [];
+function addLog(msg) {
+  const entry = `[${(/* @__PURE__ */ new Date()).toLocaleTimeString()}] ${msg}`;
+  _logBuffer.push(entry);
+  if (_logBuffer.length > MAX_LOG_LINES)
+    _logBuffer.shift();
+  console.log("Dropbox Sync:", msg);
+}
+function getLogs() {
+  return [..._logBuffer];
+}
+function clearLogs() {
+  _logBuffer.length = 0;
+}
 var REMOTE_STATE_FILENAME = ".sync_state.json";
 var SyncEngine = class {
   constructor(vault, token, options) {
@@ -258,10 +273,10 @@ var SyncEngine = class {
       lastError: null,
       progress: { total: 0, completed: 0, current: "" }
     };
-    console.log("Dropbox Sync: SyncEngine \u521B\u5EFA", {
+    addLog("SyncEngine \u521B\u5EFA: " + JSON.stringify({
       direction: options.direction,
       remoteBasePath: this.options.remoteBasePath
-    });
+    }));
   }
   getStatus() {
     return { ...this.status, progress: { ...this.status.progress } };
@@ -285,13 +300,13 @@ var SyncEngine = class {
     this.status.running = true;
     this.status.lastError = null;
     this.status.progress = { total: 0, completed: 0, current: "\u6B63\u5728\u542F\u52A8\u2026" };
-    console.log("Dropbox Sync: === \u5F00\u59CB\u540C\u6B65 ===");
-    console.log("Dropbox Sync: \u65B9\u5411:", this.options.direction);
+    addLog("=== \u5F00\u59CB\u540C\u6B65 ===");
+    addLog(`\u65B9\u5411: ${this.options.direction}`);
     try {
       await this.ensureValidToken();
       const result = await this.runSync();
       this.status.lastSyncAt = Date.now();
-      console.log("Dropbox Sync: === \u540C\u6B65\u5B8C\u6210 ===");
+      addLog("=== \u540C\u6B65\u5B8C\u6210 ===");
       new import_obsidian2.Notice("Dropbox \u540C\u6B65\u5B8C\u6210");
       return result;
     } catch (err) {
@@ -306,7 +321,7 @@ var SyncEngine = class {
     }
   }
   cancel() {
-    console.log("Dropbox Sync: \u7528\u6237\u53D6\u6D88\u4E86\u540C\u6B65");
+    addLog("\u7528\u6237\u53D6\u6D88\u4E86\u540C\u6B65");
     if (this.abortController) {
       this.abortController.abort();
     }
@@ -315,7 +330,7 @@ var SyncEngine = class {
   // ─── 单文件保存同步 ──────────────────────────────────────────────────
   async uploadFile(file) {
     if (this.status.running) {
-      console.log("Dropbox Sync: \u5168\u91CF\u540C\u6B65\u4E2D\uFF0C\u8DF3\u8FC7\u4FDD\u5B58\u65F6\u4E0A\u4F20", file.path);
+      addLog(`\u5168\u91CF\u540C\u6B65\u4E2D\uFF0C\u8DF3\u8FC7\u4FDD\u5B58\u65F6\u4E0A\u4F20 ${file.path}`);
       return;
     }
     try {
@@ -324,10 +339,10 @@ var SyncEngine = class {
       const remotePath = this.localToRemote(localPath);
       const content = await this.vault.readBinary(file);
       if (this.options.maxFileSize > 0 && content.byteLength > this.options.maxFileSize) {
-        console.log("Dropbox Sync: \u6587\u4EF6\u8D85\u8FC7\u5927\u5C0F\u9650\u5236", localPath);
+        addLog(`\u6587\u4EF6\u8D85\u8FC7\u5927\u5C0F\u9650\u5236 ${localPath}`);
         return;
       }
-      console.log("Dropbox Sync: \u4FDD\u5B58\u65F6\u4E0A\u4F20", localPath);
+      addLog(`\u4FDD\u5B58\u65F6\u4E0A\u4F20 ${localPath}`);
       await this.dropboxUpload(remotePath, content);
     } catch (err) {
       console.error(`Dropbox Sync: \u4FDD\u5B58\u65F6\u4E0A\u4F20\u5931\u8D25 ${file.path}:`, err);
@@ -359,40 +374,40 @@ var SyncEngine = class {
     var _a;
     await this.createRemoteFolder();
     const localState = await this.loadLocalState();
-    console.log("Dropbox Sync: \u672C\u5730\u72B6\u6001\u6587\u4EF6\u5DF2\u52A0\u8F7D");
+    addLog("\u672C\u5730\u72B6\u6001\u6587\u4EF6\u5DF2\u52A0\u8F7D");
+    addLog("\u5F00\u59CB\u626B\u63CF\u672C\u5730\u6587\u4EF6\uFF0C\u8BA1\u7B97 SHA-256 \u54C8\u5E0C\u2026");
     this.status.progress.current = "\u6B63\u5728\u626B\u63CF\u672C\u5730\u6587\u4EF6\u2026";
-    console.time("Dropbox Sync: \u626B\u63CF\u672C\u5730");
     const newLocalState = await this.detectLocalChanges(localState);
-    console.timeEnd("Dropbox Sync: \u626B\u63CF\u672C\u5730");
-    console.log("Dropbox Sync: \u672C\u5730\u6587\u4EF6\u6570:", Object.keys(newLocalState.files).length);
+    addLog("\u626B\u63CF\u5B8C\u6210");
+    addLog("\u672C\u5730\u6587\u4EF6\u6570: " + Object.keys(newLocalState.files).length);
     this.status.progress.current = "\u6B63\u5728\u4E0B\u8F7D\u8FDC\u7A0B\u72B6\u6001\u2026";
-    console.time("Dropbox Sync: \u4E0B\u8F7D\u8FDC\u7A0B\u72B6\u6001");
+    addLog("\u4E0B\u8F7D\u8FDC\u7A0B\u72B6\u6001\u2026");
     let remoteState = await this.downloadRemoteState();
-    console.timeEnd("Dropbox Sync: \u4E0B\u8F7D\u8FDC\u7A0B\u72B6\u6001");
+    addLog("\u8FDC\u7A0B\u72B6\u6001\u4E0B\u8F7D\u5B8C\u6210");
     if (!remoteState.files || Object.keys(remoteState.files).length === 0) {
-      console.log("Dropbox Sync: \u8FDC\u7A0B\u65E0\u72B6\u6001\u6587\u4EF6\uFF0C\u626B\u63CF\u8FDC\u7A0B\u76EE\u5F55\u2026");
+      addLog("\u8FDC\u7A0B\u65E0\u72B6\u6001\u6587\u4EF6\uFF0C\u626B\u63CF\u8FDC\u7A0B\u76EE\u5F55\u2026");
       remoteState = await this.listRemoteFilesToState();
       if (remoteState.files && Object.keys(remoteState.files).length > 0) {
         const remoteOnly = Object.keys(remoteState.files).filter(
           (p) => !(p in (newLocalState.files || {}))
         );
-        console.log(`Dropbox Sync: \u53D1\u73B0 ${Object.keys(remoteState.files).length} \u4E2A\u8FDC\u7A0B\u6587\u4EF6\uFF08${remoteOnly.length} \u4E2A\u4EC5\u8FDC\u7A0B\uFF09`);
+        addLog(`\u53D1\u73B0 ${Object.keys(remoteState.files).length} \u4E2A\u8FDC\u7A0B\u6587\u4EF6\uFF08${remoteOnly.length} \u4E2A\u4EC5\u8FDC\u7A0B\uFF09`);
       } else {
-        console.log("Dropbox Sync: \u8FDC\u7A0B\u76EE\u5F55\u4E3A\u7A7A\uFF08\u5168\u65B0\u5F00\u59CB\uFF09");
+        addLog("\u8FDC\u7A0B\u76EE\u5F55\u4E3A\u7A7A\uFF08\u5168\u65B0\u5F00\u59CB\uFF09");
       }
     } else {
-      console.log(`Dropbox Sync: \u8FDC\u7A0B\u72B6\u6001\u5305\u542B ${Object.keys(remoteState.files).length} \u4E2A\u6587\u4EF6`);
+      addLog(`\u8FDC\u7A0B\u72B6\u6001\u5305\u542B ${Object.keys(remoteState.files).length} \u4E2A\u6587\u4EF6`);
     }
     const beforeFilterCount = Object.keys(remoteState.files || {}).length;
     remoteState = this.filterStatePaths(remoteState);
     const filteredCount = beforeFilterCount - Object.keys(remoteState.files || {}).length;
     if (filteredCount > 0) {
-      console.log(`Dropbox Sync: \u8FDC\u7A0B\u72B6\u6001\u8FC7\u6EE4\u4E86 ${filteredCount} \u4E2A\u4E0D\u5E94\u540C\u6B65\u7684\u6761\u76EE`);
+      addLog(`\u8FDC\u7A0B\u72B6\u6001\u8FC7\u6EE4\u4E86 ${filteredCount} \u4E2A\u4E0D\u5E94\u540C\u6B65\u7684\u6761\u76EE`);
     }
     const actions = this.resolveStateActions(newLocalState, remoteState, this.options.direction);
-    console.log("Dropbox Sync: \u5F85\u5904\u7406", actions.length, "\u4E2A\u6587\u4EF6");
+    addLog(`\u5F85\u5904\u7406 ${actions.length} \u4E2A\u6587\u4EF6`);
     if (actions.length > 0) {
-      console.log("Dropbox Sync: \u64CD\u4F5C:", actions.map((a) => `${a.action}:${a.path}`).join(", "));
+      addLog(`\u64CD\u4F5C: ${actions.map((a) => `${a.action}:${a.path}`).join(", ")}`);
     }
     this.status.progress.total = actions.length;
     this.status.progress.completed = 0;
@@ -404,7 +419,7 @@ var SyncEngine = class {
       try {
         await this.executeAction(action, newLocalState, remoteState);
         await this.saveLocalState(this.mergeStates(newLocalState, remoteState));
-        console.log(`Dropbox Sync: [${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
+        addLog(`[${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
       } catch (err) {
         console.error(`Dropbox Sync: \u64CD\u4F5C\u5931\u8D25 ${action.action} ${action.path}:`, err);
       }
@@ -412,10 +427,10 @@ var SyncEngine = class {
     }
     const merged = this.mergeStates(newLocalState, remoteState);
     await this.saveLocalState(merged);
-    console.log("Dropbox Sync: \u672C\u5730\u72B6\u6001\u5DF2\u4FDD\u5B58");
+    addLog("\u672C\u5730\u72B6\u6001\u5DF2\u4FDD\u5B58");
     try {
       await this.uploadRemoteState(merged);
-      console.log("Dropbox Sync: \u8FDC\u7A0B\u72B6\u6001\u5DF2\u4E0A\u4F20");
+      addLog("\u8FDC\u7A0B\u72B6\u6001\u5DF2\u4E0A\u4F20");
     } catch (err) {
       console.error("Dropbox Sync: \u8FDC\u7A0B\u72B6\u6001\u4E0A\u4F20\u5931\u8D25\uFF08\u975E\u81F4\u547D\uFF09", err);
     }
@@ -535,7 +550,7 @@ var SyncEngine = class {
         continue;
       const relPath = this.relativePath(file.path);
       if (this.options.maxFileSize > 0 && file.stat.size > this.options.maxFileSize) {
-        console.log("Dropbox Sync: \u8DF3\u8FC7\u8D85\u5927\u6587\u4EF6", relPath);
+        addLog(`\u8DF3\u8FC7\u8D85\u5927\u6587\u4EF6 ${relPath}`);
         continue;
       }
       let content;
@@ -745,9 +760,9 @@ var SyncEngine = class {
   // ─── Token ─────────────────────────────────────────────────────────────
   async ensureValidToken() {
     if (isTokenExpired(this.token)) {
-      console.log("Dropbox Sync: token \u8FC7\u671F\uFF0C\u5237\u65B0\u2026");
+      addLog("token \u8FC7\u671F\uFF0C\u5237\u65B0\u2026");
       this.token = await refreshToken(this.options.clientId, this.token);
-      console.log("Dropbox Sync: token \u5237\u65B0\u6210\u529F");
+      addLog("token \u5237\u65B0\u6210\u529F");
     }
   }
   // ─── Dropbox API ───────────────────────────────────────────────────────
@@ -768,7 +783,7 @@ var SyncEngine = class {
         throw: false
       });
       if (response.status === 401) {
-        console.log("Dropbox Sync: API \u8FD4\u56DE 401\uFF0C\u81EA\u52A8\u5237\u65B0 token \u540E\u91CD\u8BD5...");
+        addLog("API \u8FD4\u56DE 401\uFF0C\u81EA\u52A8\u5237\u65B0 token \u540E\u91CD\u8BD5...");
         await this.ensureValidToken();
         const retry = await (0, import_obsidian2.requestUrl)({
           url,
@@ -792,7 +807,7 @@ var SyncEngine = class {
           const parsed = JSON.parse(body);
           const parentPath = ((_d = parsed.path) == null ? void 0 : _d.split("/").slice(0, -1).join("/")) || "";
           if (parentPath) {
-            console.log("Dropbox Sync: \u76EE\u5F55\u4E0D\u5B58\u5728\uFF0C\u81EA\u52A8\u521B\u5EFA:", parentPath);
+            addLog("\u76EE\u5F55\u4E0D\u5B58\u5728\uFF0C\u81EA\u52A8\u521B\u5EFA: " + parentPath);
             await this.createFolder(parentPath);
             const retry = await attempt();
             return retry;
@@ -820,7 +835,7 @@ var SyncEngine = class {
         throw: false
       });
       if (response.status === 401) {
-        console.log("Dropbox Sync: \u4E8C\u8FDB\u5236 API \u8FD4\u56DE 401\uFF0C\u81EA\u52A8\u5237\u65B0 token \u540E\u91CD\u8BD5...");
+        addLog("\u4E8C\u8FDB\u5236 API \u8FD4\u56DE 401\uFF0C\u81EA\u52A8\u5237\u65B0 token \u540E\u91CD\u8BD5...");
         await this.ensureValidToken();
         const retryHeaders = { "Authorization": `Bearer ${this.token.access_token}`, ...extraHeaders };
         const retry = await (0, import_obsidian2.requestUrl)({
@@ -1159,6 +1174,32 @@ var SettingsTab = class extends import_obsidian3.PluginSettingTab {
           modal.open();
         })
       );
+      containerEl.createEl("h3", { text: "\u540C\u6B65\u65E5\u5FD7" });
+      const logContainer = containerEl.createDiv();
+      const logTextarea = logContainer.createEl("textarea", {
+        attr: {
+          readonly: "readonly",
+          rows: "10",
+          style: "width: 100%; font-family: monospace; font-size: 12px; box-sizing: border-box; resize: vertical; white-space: pre;"
+        }
+      });
+      logTextarea.value = getLogs().join("\n");
+      const refreshBtn = logContainer.createEl("button", {
+        text: "\u{1F504} \u5237\u65B0\u65E5\u5FD7",
+        attr: { style: "cursor: pointer; margin-right: 8px;" }
+      });
+      refreshBtn.addEventListener("click", () => {
+        logTextarea.value = getLogs().join("\n");
+        logTextarea.scrollTop = logTextarea.scrollHeight;
+      });
+      const clearBtn = logContainer.createEl("button", {
+        text: "\u{1F5D1} \u6E05\u7A7A",
+        attr: { style: "cursor: pointer;" }
+      });
+      clearBtn.addEventListener("click", () => {
+        clearLogs();
+        logTextarea.value = "";
+      });
       containerEl.createEl("h3", { text: "\u8BBE\u7F6E\u6B65\u9AA4" });
       const infoEl = containerEl.createEl("div", { cls: "setting-item-description" });
       infoEl.innerHTML = `
@@ -1233,9 +1274,9 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     const adapter = this.app.vault.adapter;
     const basePath = (_a = adapter == null ? void 0 : adapter.getBasePath) == null ? void 0 : _a.call(adapter);
     const segments = [basePath, this.app.vault.configDir || ".obsidian", "plugins", this.manifest.id];
-    const pluginDir = basePath ? segments.filter(Boolean).join("/").replace(/\\/g, "/").replace(/([^:])\/+/g, "$1/") : __dirname;
-    const stateFilePath = pluginDir + "/state.json";
-    console.log("Dropbox Sync: \u72B6\u6001\u6587\u4EF6\u8DEF\u5F84:", stateFilePath);
+    const pluginDir = basePath ? segments.filter(Boolean).join("/").replace(/\\/g, "/").replace(/([^:])\/+/g, "$1/") : "";
+    const stateFilePath = basePath ? pluginDir + "/state.json" : ".obsidian/plugins/" + this.manifest.id + "/state.json";
+    addLog("\u72B6\u6001\u6587\u4EF6\u8DEF\u5F84: " + stateFilePath);
     this.syncEngine = new SyncEngine(this.app.vault, token, {
       direction: this.settings.syncDirection,
       remoteBasePath: this.settings.remotePath,
@@ -1362,7 +1403,7 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
           const result = await this.syncEngine.syncNow();
           this.settings.lastSyncAt = result.lastSyncAt;
           await this.saveSettings();
-          console.log("Dropbox Sync: \u540C\u6B65\u5B8C\u6210", result);
+          addLog("\u540C\u6B65\u5B8C\u6210: " + JSON.stringify(result));
           this.refreshStatusBar();
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);

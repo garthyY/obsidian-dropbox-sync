@@ -3,7 +3,7 @@ import {
 	Plugin,
 	TFile,
 } from "obsidian";
-import { SyncEngine, SyncDirection, SyncStatus, SyncResult } from "./sync-engine";
+import { SyncEngine, SyncDirection, SyncStatus, SyncResult, addLog } from "./sync-engine";
 import {
 	authorize,
 	loadToken,
@@ -79,11 +79,12 @@ export default class DropboxSyncPlugin extends Plugin {
 		const adapter = (this.app.vault.adapter as any);
 		const basePath: string | undefined = adapter?.getBasePath?.();
 		const segments = [basePath, this.app.vault.configDir || ".obsidian", "plugins", this.manifest.id];
+		// __dirname 在移动端不存在 → 用空字符串 fallback（移动端走 vault adapter）
 		const pluginDir = basePath
 			? segments.filter(Boolean).join("/").replace(/\\/g, "/").replace(/([^:])\/+/g, "$1/")
-			: __dirname;
-		const stateFilePath = pluginDir + "/state.json";
-		console.log("Dropbox Sync: 状态文件路径:", stateFilePath);
+			: "";
+		const stateFilePath = basePath ? pluginDir + "/state.json" : ".obsidian/plugins/" + this.manifest.id + "/state.json";
+		addLog("状态文件路径: " + stateFilePath);
 		this.syncEngine = new SyncEngine(this.app.vault, token, {
 			direction: this.settings.syncDirection as SyncDirection,
 			remoteBasePath: this.settings.remotePath,
@@ -232,7 +233,7 @@ export default class DropboxSyncPlugin extends Plugin {
 					const result = await this.syncEngine.syncNow();
 					this.settings.lastSyncAt = result.lastSyncAt;
 					await this.saveSettings();
-					console.log("Dropbox Sync: 同步完成", result);
+					addLog("同步完成: " + JSON.stringify(result));
 					this.refreshStatusBar();
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);

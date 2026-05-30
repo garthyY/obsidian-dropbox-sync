@@ -1,6 +1,7 @@
 import { App, Modal, PluginSettingTab, Setting, Notice } from "obsidian";
 import DropboxSyncPlugin from "./main";
 import { isTokenValid, loadToken } from "./dropbox-auth";
+import { getLogs, clearLogs } from "./sync-engine";
 
 // ─── Settings Interface ──────────────────────────────────────────────────────
 
@@ -378,6 +379,38 @@ export class SettingsTab extends PluginSettingTab {
 							modal.open();
 						}),
 				);
+
+			// ── 同步日志 ──────────────────────────────────────────────────────
+
+			containerEl.createEl("h3", { text: "同步日志" });
+
+			const logContainer = containerEl.createDiv();
+			const logTextarea = logContainer.createEl("textarea", {
+				attr: {
+					readonly: "readonly",
+					rows: "10",
+					style: "width: 100%; font-family: monospace; font-size: 12px; box-sizing: border-box; resize: vertical; white-space: pre;",
+				},
+			});
+			logTextarea.value = getLogs().join("\n");
+
+			const refreshBtn = logContainer.createEl("button", {
+				text: "🔄 刷新日志",
+				attr: { style: "cursor: pointer; margin-right: 8px;" },
+			});
+			refreshBtn.addEventListener("click", () => {
+				logTextarea.value = getLogs().join("\n");
+				logTextarea.scrollTop = logTextarea.scrollHeight;
+			});
+
+			const clearBtn = logContainer.createEl("button", {
+				text: "🗑 清空",
+				attr: { style: "cursor: pointer;" },
+			});
+			clearBtn.addEventListener("click", () => {
+				clearLogs();
+				logTextarea.value = "";
+			});
 
 			// ── 设置说明 ──────────────────────────────────────────────────────
 
