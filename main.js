@@ -327,6 +327,25 @@ var SyncEngine = class {
     }
     this.status.running = false;
   }
+  /**
+   * 首次同步 / 强制重扫：清空本地状态 + 删除远程状态文件 → 全量同步
+   */
+  async syncFresh() {
+    addLog("=== \u9996\u6B21\u540C\u6B65 / \u5F3A\u5236\u91CD\u626B ===");
+    await this.saveLocalState({ files: {} });
+    addLog("\u672C\u5730\u72B6\u6001\u5DF2\u6E05\u7A7A");
+    try {
+      await this.ensureValidToken();
+      await this.dropboxDelete(this.remoteStatePath());
+      addLog("\u8FDC\u7A0B\u72B6\u6001\u6587\u4EF6\u5DF2\u5220\u9664");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes("not_found")) {
+        console.warn("Dropbox Sync: \u5220\u9664\u8FDC\u7A0B\u72B6\u6001\u6587\u4EF6\u5931\u8D25", msg);
+      }
+    }
+    return await this.syncNow();
+  }
   // ─── 单文件保存同步 ──────────────────────────────────────────────────
   async uploadFile(file) {
     if (this.status.running) {
@@ -1167,6 +1186,28 @@ var SettingsTab = class extends import_obsidian3.PluginSettingTab {
           var _a;
           (_a = this.plugin.syncEngine) == null ? void 0 : _a.cancel();
           new import_obsidian3.Notice("\u540C\u6B65\u5DF2\u53D6\u6D88");
+        });
+      });
+      new import_obsidian3.Setting(containerEl).addButton((btn) => {
+        btn.setButtonText("\u{1F195} \u9996\u6B21\u540C\u6B65\uFF08\u6E05\u7A7A\u72B6\u6001\u91CD\u626B\uFF09").setCta().onClick(async () => {
+          if (!this.plugin.syncEngine) {
+            new import_obsidian3.Notice("\u8BF7\u5148\u6388\u6743 Dropbox");
+            return;
+          }
+          try {
+            btn.setDisabled(true);
+            btn.setButtonText("\u540C\u6B65\u4E2D\u2026");
+            const result = await this.plugin.syncEngine.syncFresh();
+            this.plugin.settings.lastSyncAt = result.lastSyncAt;
+            await this.plugin.saveSettings();
+            new import_obsidian3.Notice("\u9996\u6B21\u540C\u6B65\u5B8C\u6210\uFF01");
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            new import_obsidian3.Notice(`\u540C\u6B65\u5931\u8D25\uFF1A${msg}`, 8e3);
+          } finally {
+            btn.setDisabled(false);
+            btn.setButtonText("\u{1F195} \u9996\u6B21\u540C\u6B65\uFF08\u6E05\u7A7A\u72B6\u6001\u91CD\u626B\uFF09");
+          }
         });
       });
       containerEl.createEl("h3", { text: "\u914D\u7F6E\u5BFC\u5165\u5BFC\u51FA" });

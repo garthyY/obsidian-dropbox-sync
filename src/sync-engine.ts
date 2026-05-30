@@ -187,6 +187,29 @@ export class SyncEngine {
 		this.status.running = false;
 	}
 
+	/**
+	 * 首次同步 / 强制重扫：清空本地状态 + 删除远程状态文件 → 全量同步
+	 */
+	async syncFresh(): Promise<SyncResult> {
+		addLog("=== 首次同步 / 强制重扫 ===");
+		// 1. 清空本地状态
+		await this.saveLocalState({ files: {} });
+		addLog("本地状态已清空");
+		// 2. 尝试删除远程状态文件
+		try {
+			await this.ensureValidToken();
+			await this.dropboxDelete(this.remoteStatePath());
+			addLog("远程状态文件已删除");
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (!msg.includes("not_found")) {
+				console.warn("Dropbox Sync: 删除远程状态文件失败", msg);
+			}
+		}
+		// 3. 全量同步（两端 v=0，从头扫描）
+		return await this.syncNow();
+	}
+
 	// ─── 单文件保存同步 ──────────────────────────────────────────────────
 
 	async uploadFile(file: TFile): Promise<void> {

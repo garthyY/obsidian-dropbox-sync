@@ -362,6 +362,31 @@ export class SettingsTab extends PluginSettingTab {
 					});
 			});
 
+			new Setting(containerEl).addButton((btn) => {
+				btn.setButtonText("🆕 首次同步（清空状态重扫）")
+					.setCta()
+					.onClick(async () => {
+						if (!this.plugin.syncEngine) {
+							new Notice("请先授权 Dropbox");
+							return;
+						}
+						try {
+							btn.setDisabled(true);
+							btn.setButtonText("同步中…");
+							const result = await this.plugin.syncEngine.syncFresh();
+							this.plugin.settings.lastSyncAt = result.lastSyncAt;
+							await this.plugin.saveSettings();
+							new Notice("首次同步完成！");
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							new Notice(`同步失败：${msg}`, 8000);
+						} finally {
+							btn.setDisabled(false);
+							btn.setButtonText("🆕 首次同步（清空状态重扫）");
+						}
+					});
+			});
+
 			// ── 配置导入导出 ──────────────────────────────────────────────────
 
 			containerEl.createEl("h3", { text: "配置导入导出" });
