@@ -307,7 +307,8 @@ export class SyncEngine {
 				await this.saveLocalState(this.mergeStates(newLocalState, remoteState));
 				addLog(`[${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
 			} catch (err) {
-				console.error(`Dropbox Sync: 操作失败 ${action.action} ${action.path}:`, err);
+				const msg = err instanceof Error ? err.message : String(err);
+				addLog(`❌ 操作失败 ${action.action} ${action.path}: ${msg}`);
 			}
 			this.status.progress.completed++;
 		}

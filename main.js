@@ -430,7 +430,8 @@ var SyncEngine = class {
         await this.saveLocalState(this.mergeStates(newLocalState, remoteState));
         addLog(`[${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
       } catch (err) {
-        console.error(`Dropbox Sync: \u64CD\u4F5C\u5931\u8D25 ${action.action} ${action.path}:`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        addLog(`\u274C \u64CD\u4F5C\u5931\u8D25 ${action.action} ${action.path}: ${msg}`);
       }
       this.status.progress.completed++;
     }
