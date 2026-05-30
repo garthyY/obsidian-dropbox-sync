@@ -1,7 +1,7 @@
 {
 	"id": "obsidian-dropbox-sync",
 	"name": "Dropbox Sync",
-	"version": "0.2.5",
+	"version": "0.2.6",
 	"minAppVersion": "0.15.0",
 	"description": "Sync your vault to Dropbox",
 	"author": "obsidian-dropbox-sync",
