@@ -868,7 +868,13 @@ var SyncEngine = class {
     };
     const result = await attempt();
     if (result.status >= 400) {
-      throw new Error(`Dropbox API \u9519\u8BEF (${result.status})`);
+      let detail = "";
+      try {
+        const buf = await result.arrayBuffer();
+        detail = " " + new TextDecoder().decode(buf).slice(0, 500);
+      } catch (e) {
+      }
+      throw new Error(`Dropbox API \u9519\u8BEF (${result.status})${detail}`);
     }
     return result;
   }

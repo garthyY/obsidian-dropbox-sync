@@ -828,7 +828,12 @@ export class SyncEngine {
 		const result = await attempt();
 
 		if (result.status >= 400) {
-			throw new Error(`Dropbox API 错误 (${result.status})`);
+			let detail = "";
+			try {
+				const buf = await result.arrayBuffer();
+				detail = " " + new TextDecoder().decode(buf).slice(0, 500);
+			} catch {}
+			throw new Error(`Dropbox API 错误 (${result.status})${detail}`);
 		}
 
 		return result;
