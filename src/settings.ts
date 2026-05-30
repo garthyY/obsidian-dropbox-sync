@@ -34,6 +34,52 @@ export const DEFAULT_SETTINGS: DropboxSyncSettings = {
 	lastSyncAt: 0,
 };
 
+// ─── Export Modal ────────────────────────────────────────────────────────────
+
+/**
+ * 导出配置的模态对话框 — 显示 JSON，用户可长按复制。
+ */
+export class ExportModal extends Modal {
+	private jsonStr: string;
+
+	constructor(app: App, jsonStr: string) {
+		super(app);
+		this.jsonStr = jsonStr;
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		contentEl.createEl("h2", { text: "导出配置" });
+
+		contentEl.createEl("p", {
+			text: "请长按下方文本全选后复制，然后发送到另一台设备",
+		});
+
+		const textarea = contentEl.createEl("textarea", {
+			attr: {
+				readonly: "readonly",
+				rows: "16",
+				style: "width: 100%; font-family: monospace; font-size: 13px; box-sizing: border-box; resize: vertical; user-select: all;",
+			},
+		});
+		textarea.value = this.jsonStr;
+
+		contentEl.createEl("br");
+
+		const closeBtn = contentEl.createEl("button", {
+			text: "关闭",
+			attr: { style: "cursor: pointer;" },
+		});
+		closeBtn.addEventListener("click", () => this.close());
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
 // ─── Import Modal ────────────────────────────────────────────────────────────
 
 /**
@@ -81,12 +127,18 @@ class ImportModal extends Modal {
 			}
 			importBtn.disabled = true;
 			importBtn.textContent = "导入中…";
-			const ok = await this.plugin.importConfig(jsonStr);
-			if (ok) {
-				this.close();
-				// 刷新设置面板
-				this.plugin.settingTab?.display();
-			} else {
+			try {
+				const ok = await this.plugin.importConfig(jsonStr);
+				if (ok) {
+					this.close();
+					this.plugin.settingTab?.display();
+				} else {
+					importBtn.disabled = false;
+					importBtn.textContent = "📥 导入";
+				}
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				new Notice(`❌ 导入失败：${msg}`, 8000);
 				importBtn.disabled = false;
 				importBtn.textContent = "📥 导入";
 			}

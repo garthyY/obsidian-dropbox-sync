@@ -914,6 +914,37 @@ var DEFAULT_SETTINGS = {
   syncOnSave: true,
   lastSyncAt: 0
 };
+var ExportModal = class extends import_obsidian3.Modal {
+  constructor(app, jsonStr) {
+    super(app);
+    this.jsonStr = jsonStr;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "\u5BFC\u51FA\u914D\u7F6E" });
+    contentEl.createEl("p", {
+      text: "\u8BF7\u957F\u6309\u4E0B\u65B9\u6587\u672C\u5168\u9009\u540E\u590D\u5236\uFF0C\u7136\u540E\u53D1\u9001\u5230\u53E6\u4E00\u53F0\u8BBE\u5907"
+    });
+    const textarea = contentEl.createEl("textarea", {
+      attr: {
+        readonly: "readonly",
+        rows: "16",
+        style: "width: 100%; font-family: monospace; font-size: 13px; box-sizing: border-box; resize: vertical; user-select: all;"
+      }
+    });
+    textarea.value = this.jsonStr;
+    contentEl.createEl("br");
+    const closeBtn = contentEl.createEl("button", {
+      text: "\u5173\u95ED",
+      attr: { style: "cursor: pointer;" }
+    });
+    closeBtn.addEventListener("click", () => this.close());
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var ImportModal = class extends import_obsidian3.Modal {
   constructor(app, plugin) {
     super(app);
@@ -949,11 +980,18 @@ var ImportModal = class extends import_obsidian3.Modal {
       }
       importBtn.disabled = true;
       importBtn.textContent = "\u5BFC\u5165\u4E2D\u2026";
-      const ok = await this.plugin.importConfig(jsonStr);
-      if (ok) {
-        this.close();
-        (_a = this.plugin.settingTab) == null ? void 0 : _a.display();
-      } else {
+      try {
+        const ok = await this.plugin.importConfig(jsonStr);
+        if (ok) {
+          this.close();
+          (_a = this.plugin.settingTab) == null ? void 0 : _a.display();
+        } else {
+          importBtn.disabled = false;
+          importBtn.textContent = "\u{1F4E5} \u5BFC\u5165";
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        new import_obsidian3.Notice(`\u274C \u5BFC\u5165\u5931\u8D25\uFF1A${msg}`, 8e3);
         importBtn.disabled = false;
         importBtn.textContent = "\u{1F4E5} \u5BFC\u5165";
       }
@@ -1221,7 +1259,7 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
   }
   // ─── Config Export / Import ──────────────────────────────────────────────
   /**
-   * 序列化当前配置到 JSON 字符串并复制到剪贴板。
+   * 导出配置：优先剪贴板，失败则弹窗显示 JSON。
    */
   async exportConfigToClipboard() {
     const exportData = {};
@@ -1232,9 +1270,8 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     try {
       await navigator.clipboard.writeText(jsonStr);
       new import_obsidian4.Notice("\u2705 \u914D\u7F6E\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F", 3e3);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      new import_obsidian4.Notice(`\u274C \u590D\u5236\u5931\u8D25\uFF1A${msg}`, 5e3);
+    } catch (e) {
+      new ExportModal(this.app, jsonStr).open();
     }
   }
   /**
@@ -1273,7 +1310,11 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     }
     Object.assign(this.settings, DEFAULT_SETTINGS, parsed);
     await this.saveSettings();
-    this.reloadSyncEngine();
+    try {
+      this.reloadSyncEngine();
+    } catch (err) {
+      console.warn("Dropbox Sync: \u5BFC\u5165\u540E\u91CD\u8F7D\u5F15\u64CE\u5931\u8D25", err);
+    }
     new import_obsidian4.Notice("\u2705 \u914D\u7F6E\u5BFC\u5165\u6210\u529F", 3e3);
     return true;
   }

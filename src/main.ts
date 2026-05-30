@@ -13,7 +13,7 @@ import {
 	DropboxToken,
 	DropboxAuthConfig,
 } from "./dropbox-auth";
-import { DropboxSyncSettings, DEFAULT_SETTINGS, SettingsTab } from "./settings";
+import { DropboxSyncSettings, DEFAULT_SETTINGS, SettingsTab, ExportModal } from "./settings";
 import * as path from "path";
 
 // ─── Plugin ──────────────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ export default class DropboxSyncPlugin extends Plugin {
 	// ─── Config Export / Import ──────────────────────────────────────────────
 
 	/**
-	 * 序列化当前配置到 JSON 字符串并复制到剪贴板。
+	 * 导出配置：优先剪贴板，失败则弹窗显示 JSON。
 	 */
 	async exportConfigToClipboard(): Promise<void> {
 		const exportData: Record<string, unknown> = {};
@@ -145,9 +145,9 @@ export default class DropboxSyncPlugin extends Plugin {
 		try {
 			await navigator.clipboard.writeText(jsonStr);
 			new Notice("✅ 配置已复制到剪贴板", 3000);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			new Notice(`❌ 复制失败：${msg}`, 5000);
+		} catch {
+			// 移动端等不支持 clipboard API 的环境 → 弹窗显示
+			new ExportModal(this.app, jsonStr).open();
 		}
 	}
 
@@ -194,8 +194,12 @@ export default class DropboxSyncPlugin extends Plugin {
 		Object.assign(this.settings, DEFAULT_SETTINGS, parsed);
 		await this.saveSettings();
 
-		// 重载引擎
-		this.reloadSyncEngine();
+		// 重载引擎（失败不阻止配置导入）
+		try {
+			this.reloadSyncEngine();
+		} catch (err) {
+			console.warn("Dropbox Sync: 导入后重载引擎失败", err);
+		}
 		new Notice("✅ 配置导入成功", 3000);
 		return true;
 	}
