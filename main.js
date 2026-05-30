@@ -328,22 +328,12 @@ var SyncEngine = class {
     this.status.running = false;
   }
   /**
-   * 首次同步 / 强制重扫：清空本地状态 + 删除远程状态文件 → 全量同步
+   * 首次同步 / 强制重扫：清空本地状态 → 全量同步（远端文件用现有版本号）
    */
   async syncFresh() {
     addLog("=== \u9996\u6B21\u540C\u6B65 / \u5F3A\u5236\u91CD\u626B ===");
     await this.saveLocalState({ files: {} });
     addLog("\u672C\u5730\u72B6\u6001\u5DF2\u6E05\u7A7A");
-    try {
-      await this.ensureValidToken();
-      await this.dropboxDelete(this.remoteStatePath());
-      addLog("\u8FDC\u7A0B\u72B6\u6001\u6587\u4EF6\u5DF2\u5220\u9664");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes("not_found")) {
-        console.warn("Dropbox Sync: \u5220\u9664\u8FDC\u7A0B\u72B6\u6001\u6587\u4EF6\u5931\u8D25", msg);
-      }
-    }
     return await this.syncNow();
   }
   // ─── 单文件保存同步 ──────────────────────────────────────────────────
