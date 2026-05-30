@@ -908,6 +908,7 @@ var SyncEngine = class {
   }
   async dropboxDownload(remotePath) {
     const headers = {
+      "Content-Type": "application/octet-stream",
       "Dropbox-API-Arg": JSON.stringify({ path: remotePath })
     };
     const response = await this.apiCallBinary(
