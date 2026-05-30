@@ -188,6 +188,13 @@ export class SettingsTab extends PluginSettingTab {
 				? "✅ 已授权 Dropbox"
 				: "❌ 未授权 — 请在下方填写 App Key 并授权";
 
+			// ── 引擎状态 ──
+			const engineStatus = containerEl.createEl("div", {
+				attr: { style: "margin: 8px 0; padding: 6px; background: var(--background-secondary); border-radius: 4px; font-size: 12px;" },
+			});
+			const eng = this.plugin.syncEngine;
+			const tok = token;
+			engineStatus.innerHTML = `引擎: ${eng ? "✅ 已加载" : "❌ 未加载"}<br>Token: ${tok ? "✅ access("+tok.access_token.slice(0,6)+"...)"+(!tok.refresh_token?" ❌无refresh":" ✅有refresh") : "❌ 无"}`;
 			new Setting(containerEl)
 				.setName("Dropbox App Key")
 				.setDesc(

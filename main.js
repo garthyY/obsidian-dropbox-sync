@@ -1056,6 +1056,12 @@ var SettingsTab = class extends import_obsidian3.PluginSettingTab {
         cls: `dropbox-sync-auth-status ${isAuthed ? "authorized" : "unauthorized"}`
       });
       statusEl.textContent = isAuthed ? "\u2705 \u5DF2\u6388\u6743 Dropbox" : "\u274C \u672A\u6388\u6743 \u2014 \u8BF7\u5728\u4E0B\u65B9\u586B\u5199 App Key \u5E76\u6388\u6743";
+      const engineStatus = containerEl.createEl("div", {
+        attr: { style: "margin: 8px 0; padding: 6px; background: var(--background-secondary); border-radius: 4px; font-size: 12px;" }
+      });
+      const eng = this.plugin.syncEngine;
+      const tok = token;
+      engineStatus.innerHTML = `\u5F15\u64CE: ${eng ? "\u2705 \u5DF2\u52A0\u8F7D" : "\u274C \u672A\u52A0\u8F7D"}<br>Token: ${tok ? "\u2705 access(" + tok.access_token.slice(0, 6) + "...)" + (!tok.refresh_token ? " \u274C\u65E0refresh" : " \u2705\u6709refresh") : "\u274C \u65E0"}`;
       new import_obsidian3.Setting(containerEl).setName("Dropbox App Key").setDesc(
         "\u5728 https://www.dropbox.com/developers/apps \u521B\u5EFA\u5E94\u7528\uFF0C\u590D\u5236 App Key \u7C98\u8D34\u81F3\u6B64"
       ).addText(
