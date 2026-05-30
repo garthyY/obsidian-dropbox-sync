@@ -4,7 +4,7 @@ import {
 	isTokenExpired,
 	refreshToken,
 } from "./dropbox-auth";
-import * as fs from "fs";
+// 不顶格 import fs —— 移动端无此模块，改为函数内动态 require
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -311,24 +311,48 @@ export class SyncEngine {
 	// ─── 本地状态文件管理 ─────────────────────────────────────────────────
 
 	private async loadLocalState(): Promise<SyncState> {
-		try {
-			const content = fs.readFileSync(this.options.stateFilePath, "utf-8");
-			return JSON.parse(content);
-		} catch (err) {
-			if (err instanceof Error && (err as NodeJS.ErrnoException).code !== "ENOENT") {
-				console.warn("Dropbox Sync: 读取本地状态文件失败", this.options.stateFilePath, err);
+		const _fs = getFs();
+		if (_fs) {
+			try {
+				const content = _fs.readFileSync(this.options.stateFilePath, "utf-8");
+				return JSON.parse(content);
+			} catch (err) {
+				if (err instanceof Error && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+					console.warn("Dropbox Sync: 读取本地状态文件失败", this.options.stateFilePath, err);
+				}
+				return { files: {} };
 			}
+		}
+		// 移动端无 fs → 尝试 vault adapter
+		try {
+			const adapter = this.vault.adapter;
+			const vaultPath = `.obsidian/plugins/obsidian-dropbox-sync/state.json`;
+			const content = await adapter.read(vaultPath);
+			return JSON.parse(content);
+		} catch {
 			return { files: {} };
 		}
 	}
 
 	private async saveLocalState(state: SyncState): Promise<void> {
+		const _fs = getFs();
+		if (_fs) {
+			try {
+				_fs.writeFileSync(this.options.stateFilePath, JSON.stringify(state, null, 2), "utf-8");
+				return;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				console.error("Dropbox Sync: 保存本地状态文件失败", this.options.stateFilePath, msg);
+				throw new Error(`无法写入状态文件 ${this.options.stateFilePath}: ${msg}`);
+			}
+		}
+		// 移动端无 fs → 写入 vault
 		try {
-			fs.writeFileSync(this.options.stateFilePath, JSON.stringify(state, null, 2), "utf-8");
+			const adapter = this.vault.adapter;
+			const vaultPath = `.obsidian/plugins/obsidian-dropbox-sync/state.json`;
+			await adapter.write(vaultPath, JSON.stringify(state, null, 2));
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			console.error("Dropbox Sync: 保存本地状态文件失败", this.options.stateFilePath, msg);
-			throw new Error(`无法写入状态文件 ${this.options.stateFilePath}: ${msg}`);
+			console.warn("Dropbox Sync: 保存状态到 vault 失败", err);
 		}
 	}
 
@@ -840,5 +864,16 @@ export class SyncEngine {
 		const dot = filePath.lastIndexOf(".");
 		if (dot === -1) return filePath + suffix;
 		return filePath.slice(0, dot) + suffix + filePath.slice(dot);
+	}
+}
+
+// ─── 模块级工具 ──────────────────────────────────────────────────────────────
+
+/** 动态获取 fs 模块（移动端不可用时返回 null） */
+function getFs(): any {
+	try {
+		return require("fs");
+	} catch {
+		return null;
 	}
 }

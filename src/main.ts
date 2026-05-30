@@ -14,7 +14,7 @@ import {
 	DropboxAuthConfig,
 } from "./dropbox-auth";
 import { DropboxSyncSettings, DEFAULT_SETTINGS, SettingsTab, ExportModal } from "./settings";
-import * as path from "path";
+// 不顶格 import path —— 移动端无此模块，改为函数内动态 require / 内联拼接
 
 // ─── Plugin ──────────────────────────────────────────────────────────────────
 
@@ -72,10 +72,11 @@ export default class DropboxSyncPlugin extends Plugin {
 		// adapter.getBasePath() 返回仓库根目录，拼接 .obsidian/plugins/<id>
 		const adapter = (this.app.vault.adapter as any);
 		const basePath: string | undefined = adapter?.getBasePath?.();
+		const segments = [basePath, this.app.vault.configDir || ".obsidian", "plugins", this.manifest.id];
 		const pluginDir = basePath
-			? path.join(basePath, this.app.vault.configDir || ".obsidian", "plugins", this.manifest.id)
+			? segments.filter(Boolean).join("/").replace(/\\/g, "/").replace(/([^:])\/+/g, "$1/")
 			: __dirname;
-		const stateFilePath = path.join(pluginDir, "state.json");
+		const stateFilePath = pluginDir + "/state.json";
 		console.log("Dropbox Sync: 状态文件路径:", stateFilePath);
 		this.syncEngine = new SyncEngine(this.app.vault, token, {
 			direction: this.settings.syncDirection as SyncDirection,
