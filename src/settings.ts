@@ -160,6 +160,7 @@ class ImportModal extends Modal {
 // ─── Settings Tab ────────────────────────────────────────────────────────────
 
 export class SettingsTab extends PluginSettingTab {
+	private logInterval: number | null = null;
 	private plugin: DropboxSyncPlugin;
 
 	constructor(app: App, plugin: DropboxSyncPlugin) {
@@ -399,16 +400,18 @@ export class SettingsTab extends PluginSettingTab {
 					style: "width: 100%; font-family: monospace; font-size: 12px; box-sizing: border-box; resize: vertical; white-space: pre;",
 				},
 			});
-			logTextarea.value = getLogs().join("\n");
+			const updateLog = () => {
+				logTextarea.value = getLogs().join("\n");
+				logTextarea.scrollTop = logTextarea.scrollHeight;
+			};
+			updateLog();
+			this.logInterval = window.setInterval(updateLog, 2000);
 
 			const refreshBtn = logContainer.createEl("button", {
 				text: "🔄 刷新日志",
 				attr: { style: "cursor: pointer; margin-right: 8px;" },
 			});
-			refreshBtn.addEventListener("click", () => {
-				logTextarea.value = getLogs().join("\n");
-				logTextarea.scrollTop = logTextarea.scrollHeight;
-			});
+			refreshBtn.addEventListener("click", updateLog);
 
 			const clearBtn = logContainer.createEl("button", {
 				text: "🗑 清空",
@@ -419,7 +422,7 @@ export class SettingsTab extends PluginSettingTab {
 				logTextarea.value = "";
 			});
 
-			// ── 设置说明 ──────────────────────────────────────────────────────
+		// ── 设置说明 ──────────────────────────────────────────────────────
 
 			containerEl.createEl("h3", { text: "设置步骤" });
 			const infoEl = containerEl.createEl("div", { cls: "setting-item-description" });

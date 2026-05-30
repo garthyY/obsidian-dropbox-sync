@@ -1042,6 +1042,7 @@ var ImportModal = class extends import_obsidian3.Modal {
 var SettingsTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
+    this.logInterval = null;
     this.plugin = plugin;
   }
   display() {
@@ -1189,15 +1190,17 @@ var SettingsTab = class extends import_obsidian3.PluginSettingTab {
           style: "width: 100%; font-family: monospace; font-size: 12px; box-sizing: border-box; resize: vertical; white-space: pre;"
         }
       });
-      logTextarea.value = getLogs().join("\n");
+      const updateLog = () => {
+        logTextarea.value = getLogs().join("\n");
+        logTextarea.scrollTop = logTextarea.scrollHeight;
+      };
+      updateLog();
+      this.logInterval = window.setInterval(updateLog, 2e3);
       const refreshBtn = logContainer.createEl("button", {
         text: "\u{1F504} \u5237\u65B0\u65E5\u5FD7",
         attr: { style: "cursor: pointer; margin-right: 8px;" }
       });
-      refreshBtn.addEventListener("click", () => {
-        logTextarea.value = getLogs().join("\n");
-        logTextarea.scrollTop = logTextarea.scrollHeight;
-      });
+      refreshBtn.addEventListener("click", updateLog);
       const clearBtn = logContainer.createEl("button", {
         text: "\u{1F5D1} \u6E05\u7A7A",
         attr: { style: "cursor: pointer;" }
