@@ -18,8 +18,8 @@ export interface DropboxSyncSettings {
 	localPrefix: string;
 	/** Max file size in bytes (0 = no limit) */
 	maxFileSize: number;
-	/** Auto-sync on file save */
-	syncOnSave: boolean;
+	/** Auto-sync interval in seconds */
+	syncInterval: number;
 	/** Last successful sync timestamp (ms) */
 	lastSyncAt: number;
 }
@@ -31,7 +31,7 @@ export const DEFAULT_SETTINGS: DropboxSyncSettings = {
 	remotePath: "/Apps/ObsidianSync",
 	localPrefix: "",
 	maxFileSize: 50 * 1024 * 1024, // 50 MB
-	syncOnSave: true,
+	syncInterval: 60, // seconds, 0 = disable auto sync
 	lastSyncAt: 0,
 };
 
@@ -313,14 +313,19 @@ export class SettingsTab extends PluginSettingTab {
 				);
 
 			new Setting(containerEl)
-				.setName("保存时自动同步")
-				.setDesc("文件在 Obsidian 中保存后自动上传到 Dropbox")
-				.addToggle((toggle) =>
-					toggle
-						.setValue(this.plugin.settings.syncOnSave)
+				.setName("自动同步间隔")
+				.setDesc("每隔多少秒自动全量同步（0 = 关闭自动同步，默认 60 秒）")
+				.addText((text) =>
+					text
+						.setPlaceholder("60")
+						.setValue(String(this.plugin.settings.syncInterval))
 						.onChange(async (value) => {
-							this.plugin.settings.syncOnSave = value;
-							await this.plugin.saveSettings();
+							const num = parseInt(value, 10);
+							if (!isNaN(num) && num >= 0) {
+								this.plugin.settings.syncInterval = num;
+								await this.plugin.saveSettings();
+								this.plugin.restartAutoSync();
+							}
 						}),
 				);
 

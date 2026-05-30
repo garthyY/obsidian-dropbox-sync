@@ -24,6 +24,7 @@ export default class DropboxSyncPlugin extends Plugin {
 	settingTab: SettingsTab | null = null;
 	private statusBarItem: HTMLElement | null = null;
 	private statusInterval: number | null = null;
+	private autoSyncInterval: number | null = null;
 
 	// ─── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -42,8 +43,22 @@ export default class DropboxSyncPlugin extends Plugin {
 		// Commands
 		this.registerCommands();
 
-		// Event hooks
-		this.registerEventHooks();
+		// Ribbon button
+		this.addRibbonIcon("refresh-cw", "Dropbox 立即同步", async () => {
+			if (!this.syncEngine) {
+				new Notice("Dropbox 同步：请先在设置中授权");
+				return;
+			}
+			try {
+				const result = await this.syncEngine.syncNow();
+				this.settings.lastSyncAt = result.lastSyncAt;
+				await this.saveSettings();
+				this.refreshStatusBar();
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				new Notice(`同步错误：${msg}`, 8000);
+			}
+		});
 
 		// Initialize sync engine if already authorized
 		this.initSyncEngine();
@@ -57,6 +72,34 @@ export default class DropboxSyncPlugin extends Plugin {
 		if (this.statusInterval !== null) {
 			clearInterval(this.statusInterval);
 		}
+		this.stopAutoSync();
+	}
+
+	// ─── Auto Sync ─────────────────────────────────────────────────────────
+
+	private startAutoSync(): void {
+		this.stopAutoSync();
+		if (this.settings.syncInterval <= 0) return;
+		addLog(`启动自动同步，间隔 ${this.settings.syncInterval} 秒`);
+		this.autoSyncInterval = window.setInterval(() => {
+			if (!this.syncEngine) return;
+			if (this.syncEngine.isRunning()) return;
+			this.syncEngine.syncNow().then(() => {
+				this.settings.lastSyncAt = Date.now();
+				this.saveSettings();
+			}).catch(() => {});
+		}, this.settings.syncInterval * 1000);
+	}
+
+	private stopAutoSync(): void {
+		if (this.autoSyncInterval !== null) {
+			clearInterval(this.autoSyncInterval);
+			this.autoSyncInterval = null;
+		}
+	}
+
+	restartAutoSync(): void {
+		this.startAutoSync();
 	}
 
 	// ─── Sync Engine ─────────────────────────────────────────────────────────
@@ -93,6 +136,7 @@ export default class DropboxSyncPlugin extends Plugin {
 			clientId: this.settings.clientId,
 			stateFilePath,
 		});
+		this.startAutoSync();
 	}
 
 	/**
@@ -252,34 +296,6 @@ export default class DropboxSyncPlugin extends Plugin {
 		});
 	}
 
-	// ─── Events ──────────────────────────────────────────────────────────────
-
-	private registerEventHooks(): void {
-		// Sync on file modification (debounced)
-		this.registerEvent(
-			this.app.vault.on("modify", (file: TFile) => {
-				if (!this.syncEngine || !this.settings.syncOnSave) return;
-				if (!this.syncEngine.shouldSync(file)) return;
-				this.debouncedUpload(file);
-			}),
-		);
-
-		// Sync on file creation
-		this.registerEvent(
-			this.app.vault.on("create", (file: TFile) => {
-				if (!this.syncEngine || !this.settings.syncOnSave) return;
-				if (!this.syncEngine.shouldSync(file)) return;
-				this.debouncedUpload(file);
-			}),
-		);
-	}
-
-	private debouncedUpload = this.debounce(async (file: TFile) => {
-		if (!this.syncEngine) return;
-		await this.syncEngine.uploadFile(file);
-		this.refreshStatusBar();
-	}, 2000);
-
 	// ─── Status Bar ──────────────────────────────────────────────────────────
 
 	private refreshStatusBar(): void {
@@ -349,17 +365,4 @@ export default class DropboxSyncPlugin extends Plugin {
 
 	// ─── Utility ─────────────────────────────────────────────────────────────
 
-	private debounce<T extends (...args: unknown[]) => unknown>(
-		fn: T,
-		delay: number,
-	): (...args: Parameters<T>) => void {
-		let timer: number | null = null;
-		return (...args: Parameters<T>) => {
-			if (timer !== null) clearTimeout(timer);
-			timer = window.setTimeout(() => {
-				fn(...args);
-				timer = null;
-			}, delay);
-		};
-	}
 }

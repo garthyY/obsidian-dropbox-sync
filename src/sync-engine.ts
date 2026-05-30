@@ -641,7 +641,25 @@ export class SyncEngine {
 			remoteState.files[action.path] = { ...(localState.files[action.path] || { v: 1, exists: true, h: "" }) };
 
 		} else if (action.action === "download") {
-			const content = await this.dropboxDownload(remotePath);
+			let content: ArrayBuffer;
+			try {
+				content = await this.dropboxDownload(remotePath);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				if (msg.includes("not_found")) {
+					// 远程文件已删除，标记 exists: false，继续同步
+					const lv = (localState.files[action.path]?.v || 0);
+					const rv = (remoteState.files[action.path]?.v || 0);
+					const maxV = Math.max(lv, rv);
+					remoteState.files[action.path] = { v: maxV, exists: false, h: "" };
+					if (!(action.path in localState.files)) {
+						localState.files[action.path] = { v: maxV, exists: false, h: "" };
+					}
+					addLog(`远程文件不存在，跳过下载: ${action.path}`);
+					return;
+				}
+				throw err;
+			}
 			const h = await this.fileHash(content);
 
 			const parent = localPath.substring(0, localPath.lastIndexOf("/"));

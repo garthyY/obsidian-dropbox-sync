@@ -687,7 +687,7 @@ var SyncEngine = class {
   }
   // ─── 执行单个操作 ───────────────────────────────────────────────────
   async executeAction(action, localState, remoteState) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e, _f;
     const localPath = this.remoteToLocal(action.path);
     const remotePath = this.localToRemote(localPath);
     if (action.action === "upload") {
@@ -700,7 +700,24 @@ var SyncEngine = class {
       await this.dropboxUpload(remotePath, content);
       remoteState.files[action.path] = { ...localState.files[action.path] || { v: 1, exists: true, h: "" } };
     } else if (action.action === "download") {
-      const content = await this.dropboxDownload(remotePath);
+      let content;
+      try {
+        content = await this.dropboxDownload(remotePath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("not_found")) {
+          const lv = ((_a = localState.files[action.path]) == null ? void 0 : _a.v) || 0;
+          const rv = ((_b = remoteState.files[action.path]) == null ? void 0 : _b.v) || 0;
+          const maxV = Math.max(lv, rv);
+          remoteState.files[action.path] = { v: maxV, exists: false, h: "" };
+          if (!(action.path in localState.files)) {
+            localState.files[action.path] = { v: maxV, exists: false, h: "" };
+          }
+          addLog(`\u8FDC\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728\uFF0C\u8DF3\u8FC7\u4E0B\u8F7D: ${action.path}`);
+          return;
+        }
+        throw err;
+      }
       const h = await this.fileHash(content);
       const parent = localPath.substring(0, localPath.lastIndexOf("/"));
       if (parent && !await this.vault.adapter.exists(parent)) {
@@ -722,8 +739,8 @@ var SyncEngine = class {
         if (!msg.includes("not_found"))
           throw err;
       }
-      const lv = ((_a = localState.files[action.path]) == null ? void 0 : _a.v) || 0;
-      const rv = ((_b = remoteState.files[action.path]) == null ? void 0 : _b.v) || 0;
+      const lv = ((_c = localState.files[action.path]) == null ? void 0 : _c.v) || 0;
+      const rv = ((_d = remoteState.files[action.path]) == null ? void 0 : _d.v) || 0;
       const maxV = Math.max(lv, rv);
       remoteState.files[action.path] = { v: maxV, exists: false, h: "" };
       if (!(action.path in localState.files)) {
@@ -733,8 +750,8 @@ var SyncEngine = class {
       const file = this.vault.getFileByPath(localPath);
       if (file)
         await this.vault.delete(file, true);
-      const lv = ((_c = localState.files[action.path]) == null ? void 0 : _c.v) || 0;
-      const rv = ((_d = remoteState.files[action.path]) == null ? void 0 : _d.v) || 0;
+      const lv = ((_e = localState.files[action.path]) == null ? void 0 : _e.v) || 0;
+      const rv = ((_f = remoteState.files[action.path]) == null ? void 0 : _f.v) || 0;
       const maxV = Math.max(lv, rv);
       localState.files[action.path] = { v: maxV, exists: false, h: "" };
       if (!(action.path in remoteState.files)) {
@@ -962,7 +979,8 @@ var DEFAULT_SETTINGS = {
   localPrefix: "",
   maxFileSize: 50 * 1024 * 1024,
   // 50 MB
-  syncOnSave: true,
+  syncInterval: 60,
+  // seconds, 0 = disable auto sync
   lastSyncAt: 0
 };
 var ExportModal = class extends import_obsidian3.Modal {
@@ -1151,10 +1169,14 @@ var SettingsTab = class extends import_obsidian3.PluginSettingTab {
           }
         })
       );
-      new import_obsidian3.Setting(containerEl).setName("\u4FDD\u5B58\u65F6\u81EA\u52A8\u540C\u6B65").setDesc("\u6587\u4EF6\u5728 Obsidian \u4E2D\u4FDD\u5B58\u540E\u81EA\u52A8\u4E0A\u4F20\u5230 Dropbox").addToggle(
-        (toggle) => toggle.setValue(this.plugin.settings.syncOnSave).onChange(async (value) => {
-          this.plugin.settings.syncOnSave = value;
-          await this.plugin.saveSettings();
+      new import_obsidian3.Setting(containerEl).setName("\u81EA\u52A8\u540C\u6B65\u95F4\u9694").setDesc("\u6BCF\u9694\u591A\u5C11\u79D2\u81EA\u52A8\u5168\u91CF\u540C\u6B65\uFF080 = \u5173\u95ED\u81EA\u52A8\u540C\u6B65\uFF0C\u9ED8\u8BA4 60 \u79D2\uFF09").addText(
+        (text) => text.setPlaceholder("60").setValue(String(this.plugin.settings.syncInterval)).onChange(async (value) => {
+          const num = parseInt(value, 10);
+          if (!isNaN(num) && num >= 0) {
+            this.plugin.settings.syncInterval = num;
+            await this.plugin.saveSettings();
+            this.plugin.restartAutoSync();
+          }
         })
       );
       containerEl.createEl("h3", { text: "\u624B\u52A8\u540C\u6B65" });
@@ -1279,12 +1301,7 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     this.settingTab = null;
     this.statusBarItem = null;
     this.statusInterval = null;
-    this.debouncedUpload = this.debounce(async (file) => {
-      if (!this.syncEngine)
-        return;
-      await this.syncEngine.uploadFile(file);
-      this.refreshStatusBar();
-    }, 2e3);
+    this.autoSyncInterval = null;
   }
   // ─── Lifecycle ───────────────────────────────────────────────────────────
   async onload() {
@@ -1295,7 +1312,21 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     this.settingTab = new SettingsTab(this.app, this);
     this.addSettingTab(this.settingTab);
     this.registerCommands();
-    this.registerEventHooks();
+    this.addRibbonIcon("refresh-cw", "Dropbox \u7ACB\u5373\u540C\u6B65", async () => {
+      if (!this.syncEngine) {
+        new import_obsidian4.Notice("Dropbox \u540C\u6B65\uFF1A\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u6388\u6743");
+        return;
+      }
+      try {
+        const result = await this.syncEngine.syncNow();
+        this.settings.lastSyncAt = result.lastSyncAt;
+        await this.saveSettings();
+        this.refreshStatusBar();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        new import_obsidian4.Notice(`\u540C\u6B65\u9519\u8BEF\uFF1A${msg}`, 8e3);
+      }
+    });
     this.initSyncEngine();
     this.statusInterval = window.setInterval(() => this.refreshStatusBar(), 5e3);
   }
@@ -1305,6 +1336,34 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     if (this.statusInterval !== null) {
       clearInterval(this.statusInterval);
     }
+    this.stopAutoSync();
+  }
+  // ─── Auto Sync ─────────────────────────────────────────────────────────
+  startAutoSync() {
+    this.stopAutoSync();
+    if (this.settings.syncInterval <= 0)
+      return;
+    addLog(`\u542F\u52A8\u81EA\u52A8\u540C\u6B65\uFF0C\u95F4\u9694 ${this.settings.syncInterval} \u79D2`);
+    this.autoSyncInterval = window.setInterval(() => {
+      if (!this.syncEngine)
+        return;
+      if (this.syncEngine.isRunning())
+        return;
+      this.syncEngine.syncNow().then(() => {
+        this.settings.lastSyncAt = Date.now();
+        this.saveSettings();
+      }).catch(() => {
+      });
+    }, this.settings.syncInterval * 1e3);
+  }
+  stopAutoSync() {
+    if (this.autoSyncInterval !== null) {
+      clearInterval(this.autoSyncInterval);
+      this.autoSyncInterval = null;
+    }
+  }
+  restartAutoSync() {
+    this.startAutoSync();
   }
   // ─── Sync Engine ─────────────────────────────────────────────────────────
   initSyncEngine() {
@@ -1334,6 +1393,7 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
       clientId: this.settings.clientId,
       stateFilePath
     });
+    this.startAutoSync();
   }
   /**
    * Re-create the sync engine (e.g. after auth or settings change).
@@ -1470,27 +1530,6 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
       }
     });
   }
-  // ─── Events ──────────────────────────────────────────────────────────────
-  registerEventHooks() {
-    this.registerEvent(
-      this.app.vault.on("modify", (file) => {
-        if (!this.syncEngine || !this.settings.syncOnSave)
-          return;
-        if (!this.syncEngine.shouldSync(file))
-          return;
-        this.debouncedUpload(file);
-      })
-    );
-    this.registerEvent(
-      this.app.vault.on("create", (file) => {
-        if (!this.syncEngine || !this.settings.syncOnSave)
-          return;
-        if (!this.syncEngine.shouldSync(file))
-          return;
-        this.debouncedUpload(file);
-      })
-    );
-  }
   // ─── Status Bar ──────────────────────────────────────────────────────────
   refreshStatusBar() {
     if (!this.statusBarItem)
@@ -1547,15 +1586,4 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     await this.saveData(this.settings);
   }
   // ─── Utility ─────────────────────────────────────────────────────────────
-  debounce(fn, delay) {
-    let timer = null;
-    return (...args) => {
-      if (timer !== null)
-        clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        fn(...args);
-        timer = null;
-      }, delay);
-    };
-  }
 };
