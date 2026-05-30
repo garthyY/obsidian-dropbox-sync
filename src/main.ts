@@ -64,6 +64,12 @@ export default class DropboxSyncPlugin extends Plugin {
 	private initSyncEngine(): void {
 		const token = loadToken(this.settings.dropboxToken);
 		if (!isTokenValid(token)) {
+			if (token) {
+				new Notice(`❌ Token 缺少 refresh_token（值为空），请重新授权`, 8000);
+			} else {
+				const raw = this.settings.dropboxToken;
+				new Notice(`❌ Token 加载失败: type=${typeof raw}, keys=${raw ? Object.keys(raw).join(",") : "null"}`, 8000);
+			}
 			this.syncEngine = null;
 			return;
 		}
@@ -199,9 +205,15 @@ export default class DropboxSyncPlugin extends Plugin {
 		try {
 			this.reloadSyncEngine();
 		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`⚠️ 配置已保存，但引擎加载失败：${msg}`, 8000);
 			console.warn("Dropbox Sync: 导入后重载引擎失败", err);
 		}
-		new Notice("✅ 配置导入成功", 3000);
+		if (this.syncEngine) {
+			new Notice("✅ 配置导入成功，引擎已就绪", 3000);
+		} else {
+			new Notice("⚠️ 配置已保存，但引擎未加载（检查 Token 是否有效）", 8000);
+		}
 		return true;
 	}
 

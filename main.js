@@ -1221,6 +1221,12 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     var _a;
     const token = loadToken(this.settings.dropboxToken);
     if (!isTokenValid(token)) {
+      if (token) {
+        new import_obsidian4.Notice(`\u274C Token \u7F3A\u5C11 refresh_token\uFF08\u503C\u4E3A\u7A7A\uFF09\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743`, 8e3);
+      } else {
+        const raw = this.settings.dropboxToken;
+        new import_obsidian4.Notice(`\u274C Token \u52A0\u8F7D\u5931\u8D25: type=${typeof raw}, keys=${raw ? Object.keys(raw).join(",") : "null"}`, 8e3);
+      }
       this.syncEngine = null;
       return;
     }
@@ -1331,9 +1337,15 @@ var DropboxSyncPlugin = class extends import_obsidian4.Plugin {
     try {
       this.reloadSyncEngine();
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      new import_obsidian4.Notice(`\u26A0\uFE0F \u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F15\u64CE\u52A0\u8F7D\u5931\u8D25\uFF1A${msg}`, 8e3);
       console.warn("Dropbox Sync: \u5BFC\u5165\u540E\u91CD\u8F7D\u5F15\u64CE\u5931\u8D25", err);
     }
-    new import_obsidian4.Notice("\u2705 \u914D\u7F6E\u5BFC\u5165\u6210\u529F", 3e3);
+    if (this.syncEngine) {
+      new import_obsidian4.Notice("\u2705 \u914D\u7F6E\u5BFC\u5165\u6210\u529F\uFF0C\u5F15\u64CE\u5DF2\u5C31\u7EEA", 3e3);
+    } else {
+      new import_obsidian4.Notice("\u26A0\uFE0F \u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F15\u64CE\u672A\u52A0\u8F7D\uFF08\u68C0\u67E5 Token \u662F\u5426\u6709\u6548\uFF09", 8e3);
+    }
     return true;
   }
   // ─── Commands ────────────────────────────────────────────────────────────
