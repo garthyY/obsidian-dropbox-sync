@@ -425,10 +425,11 @@ var SyncEngine = class {
         throw new Error("\u540C\u6B65\u5DF2\u53D6\u6D88");
       }
       this.status.progress.current = action.path;
+      addLog(`\u25B6 [${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
       try {
         await this.executeAction(action, newLocalState, remoteState);
         await this.saveLocalState(this.mergeStates(newLocalState, remoteState));
-        addLog(`[${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
+        addLog(`\u2713 [${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         addLog(`\u274C \u64CD\u4F5C\u5931\u8D25 ${action.action} ${action.path}: ${msg}`);

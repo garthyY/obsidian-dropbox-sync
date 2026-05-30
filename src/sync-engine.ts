@@ -301,11 +301,12 @@ export class SyncEngine {
 				throw new Error("同步已取消");
 			}
 			this.status.progress.current = action.path;
+			addLog(`▶ [${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
 			try {
 				await this.executeAction(action, newLocalState, remoteState);
 				// 操作成功 → 立即保存本地状态，崩溃后下次同步能从中断点继续
 				await this.saveLocalState(this.mergeStates(newLocalState, remoteState));
-				addLog(`[${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
+				addLog(`✓ [${this.status.progress.completed + 1}/${actions.length}] ${action.action} ${action.path}`);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				addLog(`❌ 操作失败 ${action.action} ${action.path}: ${msg}`);
